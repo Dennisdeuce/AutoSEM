@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 import requests
 from fastapi import APIRouter, Depends
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -20,71 +20,99 @@ router = APIRouter()
 
 def _get_meta_token(db: Session) -> str:
     """Get Meta access token from DB or environment."""
-    token_record = db.query(MetaTokenModel).first()
-    if token_record and token_record.access_token:
-        return token_record.access_token
+    try:
+        token_record = db.query(MetaTokenModel).first()
+        if token_record and token_record.access_token:
+            return token_record.access_token
+    except Exception:
+        pass
     return os.environ.get("META_ACCESS_TOKEN", "")
 
 
 @router.get("/status", summary="Get Dashboard Status",
             description="Get current system status and metrics")
 def get_dashboard_status(db: Session = Depends(get_db)):
-    active = db.query(CampaignModel).filter(CampaignModel.status == "active").count()
-    today_spend = db.query(func.sum(CampaignModel.spend)).scalar() or 0
-    today_revenue = db.query(func.sum(CampaignModel.revenue)).scalar() or 0
-    today_roas = today_revenue / today_spend if today_spend > 0 else 0
+    try:
+        active = db.query(CampaignModel).filter(CampaignModel.status == "active").count()
+        today_spend = db.query(func.sum(CampaignModel.spend)).scalar() or 0
+        today_revenue = db.query(func.sum(CampaignModel.revenue)).scalar() or 0
+        today_roas = today_revenue / today_spend if today_spend > 0 else 0
 
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    actions_today = db.query(ActivityLogModel).filter(
-        ActivityLogModel.timestamp >= today_start
-    ).count()
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        actions_today = db.query(ActivityLogModel).filter(
+            ActivityLogModel.timestamp >= today_start
+        ).count()
 
-    return {
-        "status": "operational",
-        "last_optimization": "1 day ago",
-        "actions_today": actions_today,
-        "spend_today": round(today_spend, 2),
-        "revenue_today": round(today_revenue, 2),
-        "roas_today": round(today_roas, 2),
-        "orders_today": 0,
-        "active_campaigns": active,
-    }
+        return {
+            "status": "operational",
+            "last_optimization": "1 day ago",
+            "actions_today": actions_today,
+            "spend_today": round(today_spend, 2),
+            "revenue_today": round(today_revenue, 2),
+            "roas_today": round(today_roas, 2),
+            "orders_today": 0,
+            "active_campaigns": active,
+        }
+    except Exception as e:
+        logger.error(f"Dashboard status error: {e}")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "degraded",
+                "last_optimization": "unknown",
+                "actions_today": 0,
+                "spend_today": 0,
+                "revenue_today": 0,
+                "roas_today": 0,
+                "orders_today": 0,
+                "active_campaigns": 0,
+                "error": str(e),
+            }
+        )
 
 
 @router.post("/pause-all", summary="Pause All Campaigns",
              description="Emergency pause all campaigns")
 def pause_all_campaigns(db: Session = Depends(get_db)):
-    campaigns = db.query(CampaignModel).filter(CampaignModel.status == "active").all()
-    count = 0
-    for c in campaigns:
-        c.status = "PAUSED"
-        count += 1
-    db.commit()
+    try:
+        campaigns = db.query(CampaignModel).filter(CampaignModel.status == "active").all()
+        count = 0
+        for c in campaigns:
+            c.status = "PAUSED"
+            count += 1
+        db.commit()
 
-    log = ActivityLogModel(action="EMERGENCY_PAUSE", details=f"Paused {count} campaigns")
-    db.add(log)
-    db.commit()
+        log = ActivityLogModel(action="EMERGENCY_PAUSE", details=f"Paused {count} campaigns")
+        db.add(log)
+        db.commit()
 
-    logger.warning(f"Emergency pause: {count} campaigns paused")
-    return {"status": "paused", "campaigns_paused": count}
+        logger.warning(f"Emergency pause: {count} campaigns paused")
+        return {"status": "paused", "campaigns_paused": count}
+    except Exception as e:
+        logger.error(f"Pause all failed: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @router.post("/resume-all", summary="Resume All Campaigns",
              description="Resume all paused campaigns")
 def resume_all_campaigns(db: Session = Depends(get_db)):
-    campaigns = db.query(CampaignModel).filter(CampaignModel.status == "PAUSED").all()
-    count = 0
-    for c in campaigns:
-        c.status = "active"
-        count += 1
-    db.commit()
+    try:
+        campaigns = db.query(CampaignModel).filter(CampaignModel.status == "PAUSED").all()
+        count = 0
+        for c in campaigns:
+            c.status = "active"
+            count += 1
+        db.commit()
 
-    log = ActivityLogModel(action="RESUME_ALL", details=f"Resumed {count} campaigns")
-    db.add(log)
-    db.commit()
+        log = ActivityLogModel(action="RESUME_ALL", details=f"Resumed {count} campaigns")
+        db.add(log)
+        db.commit()
 
-    logger.info(f"Resumed {count} campaigns")
-    return {"status": "resumed", "campaigns_resumed": count}
+        logger.info(f"Resumed {count} campaigns")
+        return {"status": "resumed", "campaigns_resumed": count}
+    except Exception as e:
+        logger.error(f"Resume all failed: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @router.get("/dashboard", summary="Get Dashboard Page",
@@ -92,7 +120,6 @@ def resume_all_campaigns(db: Session = Depends(get_db)):
 def get_dashboard_page():
     # Try multiple template locations
     possible_paths = [
-        os.path.join(os.path.dirname(__file__), "..", "..", "templates", "design_doc.html"),
         os.path.join(os.path.dirname(__file__), "..", "..", "templates", "dashboard.html"),
     ]
     for template_path in possible_paths:
@@ -105,74 +132,90 @@ def get_dashboard_page():
 @router.get("/metrics/daily", summary="Get Daily Metrics",
             description="Get detailed daily metrics")
 def get_daily_metrics(db: Session = Depends(get_db)):
-    total_spend = db.query(func.sum(CampaignModel.spend)).scalar() or 0
-    total_revenue = db.query(func.sum(CampaignModel.revenue)).scalar() or 0
-    total_conversions = db.query(func.sum(CampaignModel.conversions)).scalar() or 0
-    roas = total_revenue / total_spend if total_spend > 0 else 0
+    try:
+        total_spend = db.query(func.sum(CampaignModel.spend)).scalar() or 0
+        total_revenue = db.query(func.sum(CampaignModel.revenue)).scalar() or 0
+        total_conversions = db.query(func.sum(CampaignModel.conversions)).scalar() or 0
+        roas = total_revenue / total_spend if total_spend > 0 else 0
 
-    return {
-        "date": datetime.utcnow().strftime("%Y-%m-%d"),
-        "spend": round(total_spend, 2),
-        "revenue": round(total_revenue, 2),
-        "conversions": total_conversions,
-        "roas": round(roas, 2),
-        "cpa": round(total_spend / total_conversions, 2) if total_conversions > 0 else 0,
-    }
+        return {
+            "date": datetime.utcnow().strftime("%Y-%m-%d"),
+            "spend": round(total_spend, 2),
+            "revenue": round(total_revenue, 2),
+            "conversions": total_conversions,
+            "roas": round(roas, 2),
+            "cpa": round(total_spend / total_conversions, 2) if total_conversions > 0 else 0,
+        }
+    except Exception as e:
+        logger.error(f"Daily metrics error: {e}")
+        return {"date": datetime.utcnow().strftime("%Y-%m-%d"), "spend": 0, "revenue": 0, "conversions": 0, "roas": 0, "cpa": 0, "error": str(e)}
 
 
 @router.get("/metrics/weekly", summary="Get Weekly Metrics",
             description="Get weekly metrics for reporting")
 def get_weekly_metrics(db: Session = Depends(get_db)):
-    total_spend = db.query(func.sum(CampaignModel.total_spend)).scalar() or 0
-    total_revenue = db.query(func.sum(CampaignModel.total_revenue)).scalar() or 0
-    total_conversions = db.query(func.sum(CampaignModel.conversions)).scalar() or 0
+    try:
+        total_spend = db.query(func.sum(CampaignModel.total_spend)).scalar() or 0
+        total_revenue = db.query(func.sum(CampaignModel.total_revenue)).scalar() or 0
+        total_conversions = db.query(func.sum(CampaignModel.conversions)).scalar() or 0
 
-    return {
-        "period": "last_7_days",
-        "total_spend": round(total_spend, 2),
-        "total_revenue": round(total_revenue, 2),
-        "total_conversions": total_conversions,
-        "avg_roas": round(total_revenue / total_spend, 2) if total_spend > 0 else 0,
-    }
+        return {
+            "period": "last_7_days",
+            "total_spend": round(total_spend, 2),
+            "total_revenue": round(total_revenue, 2),
+            "total_conversions": total_conversions,
+            "avg_roas": round(total_revenue / total_spend, 2) if total_spend > 0 else 0,
+        }
+    except Exception as e:
+        logger.error(f"Weekly metrics error: {e}")
+        return {"period": "last_7_days", "total_spend": 0, "total_revenue": 0, "total_conversions": 0, "avg_roas": 0, "error": str(e)}
 
 
 @router.get("/campaigns/performance", summary="Get Campaign Performance",
             description="Get performance data for all campaigns")
 def get_campaign_performance(db: Session = Depends(get_db)):
-    campaigns = db.query(CampaignModel).filter(CampaignModel.status == "active").all()
-    return [
-        {
-            "id": c.id,
-            "name": c.name,
-            "platform": c.platform,
-            "spend": c.spend,
-            "revenue": c.revenue,
-            "roas": c.roas,
-            "conversions": c.conversions,
-            "status": c.status,
-        }
-        for c in campaigns
-    ]
+    try:
+        campaigns = db.query(CampaignModel).filter(CampaignModel.status == "active").all()
+        return [
+            {
+                "id": c.id,
+                "name": c.name,
+                "platform": c.platform,
+                "spend": c.spend,
+                "revenue": c.revenue,
+                "roas": c.roas,
+                "conversions": c.conversions,
+                "status": c.status,
+            }
+            for c in campaigns
+        ]
+    except Exception as e:
+        logger.error(f"Campaign performance error: {e}")
+        return []
 
 
 @router.get("/activity", summary="Get Recent Activity",
             description="Get recent optimization activity from logs")
 def get_recent_activity(limit: int = 10, db: Session = Depends(get_db)):
-    logs = db.query(ActivityLogModel).order_by(
-        ActivityLogModel.timestamp.desc()
-    ).limit(limit).all()
+    try:
+        logs = db.query(ActivityLogModel).order_by(
+            ActivityLogModel.timestamp.desc()
+        ).limit(limit).all()
 
-    return [
-        {
-            "id": log.id,
-            "action": log.action,
-            "entity_type": log.entity_type,
-            "entity_id": log.entity_id,
-            "details": log.details,
-            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
-        }
-        for log in logs
-    ]
+        return [
+            {
+                "id": log.id,
+                "action": log.action,
+                "entity_type": log.entity_type,
+                "entity_id": log.entity_id,
+                "details": log.details,
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+            }
+            for log in logs
+        ]
+    except Exception as e:
+        logger.error(f"Activity log error: {e}")
+        return []
 
 
 @router.post("/log-activity", summary="Log Activity",
@@ -184,15 +227,19 @@ def log_activity(
     details: str = None,
     db: Session = Depends(get_db),
 ):
-    log = ActivityLogModel(
-        action=action,
-        entity_type=entity_type,
-        entity_id=entity_id,
-        details=details,
-    )
-    db.add(log)
-    db.commit()
-    return {"status": "logged", "id": log.id}
+    try:
+        log = ActivityLogModel(
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            details=details,
+        )
+        db.add(log)
+        db.commit()
+        return {"status": "logged", "id": log.id}
+    except Exception as e:
+        logger.error(f"Log activity error: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 @router.get("/meta-performance", summary="Get Meta Performance",
