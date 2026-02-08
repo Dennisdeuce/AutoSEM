@@ -33,29 +33,38 @@ _automation_state = {
 }
 
 
-@router.get("/status", summary="Get Automation Status")
+@router.get("/status", summary="Get Automation Status",
+            description="Get current automation engine status")
 def get_automation_status() -> dict:
     return _automation_state
 
 
-@router.post("/start", summary="Start Automation")
+@router.post("/start", summary="Start Automation",
+             description="Start the automation engine")
 def start_automation() -> dict:
     _automation_state["is_running"] = True
+    logger.info("\ud83d\udfe2 Automation engine started")
     return {"status": "started", "is_running": True}
 
 
-@router.post("/stop", summary="Stop Automation")
+@router.post("/stop", summary="Stop Automation",
+             description="Stop the automation engine")
 def stop_automation() -> dict:
     _automation_state["is_running"] = False
+    logger.info("\ud83d\udd34 Automation engine stopped")
     return {"status": "stopped", "is_running": False}
 
 
-@router.post("/run-cycle", summary="Run Automation Cycle")
+@router.post("/run-cycle", summary="Run Automation Cycle",
+             description="Manually trigger a full automation cycle")
 def run_automation_cycle(db: Session = Depends(get_db)) -> dict:
     if not _automation_state["is_running"]:
         return {"status": "error", "message": "Automation is paused"}
 
-    results = {"cycle_start": datetime.utcnow().isoformat(), "steps": []}
+    results = {
+        "cycle_start": datetime.utcnow().isoformat(),
+        "steps": [],
+    }
 
     try:
         generator = CampaignGenerator()
@@ -80,33 +89,42 @@ def run_automation_cycle(db: Session = Depends(get_db)) -> dict:
     _automation_state["last_optimization"] = datetime.utcnow().isoformat()
     results["cycle_end"] = datetime.utcnow().isoformat()
 
-    log = ActivityLogModel(action="AUTOMATION_CYCLE", details=json.dumps(results, default=str))
+    log = ActivityLogModel(
+        action="AUTOMATION_CYCLE",
+        details=json.dumps(results, default=str),
+    )
     db.add(log)
     db.commit()
+
     return results
 
 
-@router.post("/create-campaigns", summary="Create Campaigns")
+@router.post("/create-campaigns", summary="Create Campaigns",
+             description="Create AI-powered campaigns for products without campaigns")
 def create_campaigns(db: Session = Depends(get_db)) -> dict:
     generator = CampaignGenerator()
     try:
         created = generator.create_for_uncovered_products(db)
         return {"status": "success", "campaigns_created": created}
     except Exception as e:
+        logger.error(f"Campaign creation failed: {e}")
         return {"status": "error", "message": str(e)}
 
 
-@router.post("/optimize", summary="Run Optimization")
+@router.post("/optimize", summary="Run Optimization",
+             description="Run optimization on all active campaigns")
 def run_optimization(db: Session = Depends(get_db)) -> dict:
     optimizer = CampaignOptimizer()
     try:
         results = optimizer.optimize_all(db)
         return {"status": "success", "optimizations": results}
     except Exception as e:
+        logger.error(f"Optimization failed: {e}")
         return {"status": "error", "message": str(e)}
 
 
-@router.post("/push-live", summary="Push Campaigns Live")
+@router.post("/push-live", summary="Push Campaigns Live",
+             description="Push all pending campaigns to Google Ads and make them live")
 def push_campaigns_live(db: Session = Depends(get_db)) -> dict:
     google_ads = GoogleAdsService()
     meta_ads = MetaAdsService()
@@ -143,29 +161,39 @@ def push_campaigns_live(db: Session = Depends(get_db)) -> dict:
             pushed["errors"].append(f"Meta: {campaign.name}: {str(e)}")
 
     db.commit()
-    log = ActivityLogModel(action="PUSH_LIVE", details=json.dumps(pushed))
+
+    log = ActivityLogModel(
+        action="PUSH_LIVE",
+        details=json.dumps(pushed),
+    )
     db.add(log)
     db.commit()
+
+    logger.info(f"Pushed live: {pushed['google_ads']} Google, {pushed['meta']} Meta")
     return pushed
 
 
-@router.post("/sync-performance", summary="Sync Performance")
+@router.post("/sync-performance", summary="Sync Performance",
+             description="Sync performance data from Google Ads")
 def sync_performance(db: Session = Depends(get_db)) -> dict:
     google_ads = GoogleAdsService()
     try:
         result = google_ads.sync_performance(db)
         return {"status": "success", **result}
     except Exception as e:
+        logger.error(f"Performance sync failed: {e}")
         return {"status": "error", "message": str(e)}
 
 
-@router.post("/update-meta-token", summary="Update Meta Token")
+@router.post("/update-meta-token", summary="Update Meta Token",
+             description="Exchange short-lived Meta token for long-lived token")
 def update_meta_token(token_data: TokenUpdate, db: Session = Depends(get_db)) -> dict:
     meta = MetaAdsService()
     try:
         result = meta.exchange_token(token_data.access_token, db)
         return {"status": "success", **result}
     except Exception as e:
+        logger.error(f"Meta token update failed: {e}")
         return {"status": "error", "message": str(e)}
 
 
@@ -184,9 +212,11 @@ def _check_safety_limits(db: Session) -> dict:
         for c in campaigns:
             c.status = "PAUSED"
         db.commit()
+        logger.critical(f"\ud83d\udea8 EMERGENCY PAUSE: Net loss ${net_loss:.2f} exceeds ${emergency_limit}")
         return {"action": "EMERGENCY_PAUSE", "net_loss": net_loss}
 
     if total_spend >= daily_limit:
+        logger.warning(f"\u26a0\ufe0f Daily spend limit reached: ${total_spend:.2f} >= ${daily_limit}")
         return {"action": "DAILY_LIMIT_REACHED", "spend": total_spend}
 
     return {"action": "OK", "spend": total_spend, "limit": daily_limit}
