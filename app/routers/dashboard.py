@@ -6,15 +6,24 @@ import os
 import logging
 from datetime import datetime, timedelta
 
+import requests
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.database import get_db, CampaignModel, ActivityLogModel, ProductModel
+from app.database import get_db, CampaignModel, ActivityLogModel, ProductModel, MetaTokenModel
 
 logger = logging.getLogger("AutoSEM.Dashboard")
 router = APIRouter()
+
+
+def _get_meta_token(db: Session) -> str:
+    """Get Meta access token from DB or environment."""
+    token_record = db.query(MetaTokenModel).first()
+    if token_record and token_record.access_token:
+        return token_record.access_token
+    return os.environ.get("META_ACCESS_TOKEN", "")
 
 
 @router.get("/status", summary="Get Dashboard Status",
@@ -56,7 +65,7 @@ def pause_all_campaigns(db: Session = Depends(get_db)):
     db.add(log)
     db.commit()
 
-    logger.warning(f"⚠️ Emergency pause: {count} campaigns paused")
+    logger.warning(f"Emergency pause: {count} campaigns paused")
     return {"status": "paused", "campaigns_paused": count}
 
 
@@ -74,18 +83,23 @@ def resume_all_campaigns(db: Session = Depends(get_db)):
     db.add(log)
     db.commit()
 
-    logger.info(f"✅ Resumed {count} campaigns")
+    logger.info(f"Resumed {count} campaigns")
     return {"status": "resumed", "campaigns_resumed": count}
 
 
 @router.get("/dashboard", summary="Get Dashboard Page",
             description="Serve the dashboard HTML page")
 def get_dashboard_page():
-    template_path = os.path.join(os.path.dirname(__file__), "..", "..", "templates", "dashboard.html")
-    if os.path.exists(template_path):
-        with open(template_path) as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Dashboard</h1>")
+    # Try multiple template locations
+    possible_paths = [
+        os.path.join(os.path.dirname(__file__), "..", "..", "templates", "design_doc.html"),
+        os.path.join(os.path.dirname(__file__), "..", "..", "templates", "dashboard.html"),
+    ]
+    for template_path in possible_paths:
+        if os.path.exists(template_path):
+            with open(template_path) as f:
+                return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Dashboard</h1><p>No template found</p>")
 
 
 @router.get("/metrics/daily", summary="Get Daily Metrics",
@@ -184,23 +198,108 @@ def log_activity(
 @router.get("/meta-performance", summary="Get Meta Performance",
             description="Fetch live performance data directly from Meta Ads API")
 def get_meta_performance(db: Session = Depends(get_db)):
-    from app.services.meta_ads import MetaAdsService
-    meta = MetaAdsService()
+    access_token = _get_meta_token(db)
+    ad_account_id = os.environ.get("META_AD_ACCOUNT_ID", "")
+
+    if not access_token or not ad_account_id:
+        return {"platform": "meta", "error": "Meta Ads not configured"}
+
     try:
-        return meta.get_performance(db)
+        # Fetch all campaigns with insights
+        start_date = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+        end_date = datetime.utcnow().strftime("%Y-%m-%d")
+
+        resp = requests.get(
+            f"https://graph.facebook.com/v19.0/act_{ad_account_id}/campaigns",
+            params={
+                "fields": "id,name,status,insights.time_range({{\"since\":\"{start}\",\"until\":\"{end}\"}}){{spend,impressions,clicks,reach,ctr,cpc}}".format(
+                    start=start_date, end=end_date
+                ),
+                "access_token": access_token,
+                "limit": 100,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+
+        campaigns = []
+        total_spend = 0
+        total_impressions = 0
+        total_clicks = 0
+        total_reach = 0
+
+        for campaign in data:
+            insights = campaign.get("insights", {}).get("data", [{}])
+            insight = insights[0] if insights else {}
+
+            spend = float(insight.get("spend", 0))
+            impressions = int(insight.get("impressions", 0))
+            clicks = int(insight.get("clicks", 0))
+            reach = int(insight.get("reach", 0))
+            ctr = float(insight.get("ctr", 0))
+            cpc = float(insight.get("cpc", 0))
+
+            if spend > 0 or impressions > 0:
+                campaigns.append({
+                    "id": campaign["id"],
+                    "name": campaign.get("name", ""),
+                    "status": campaign.get("status", "UNKNOWN"),
+                    "spend": round(spend, 2),
+                    "impressions": impressions,
+                    "clicks": clicks,
+                    "reach": reach,
+                    "ctr": round(ctr, 2),
+                    "cpc": round(cpc, 2),
+                })
+                total_spend += spend
+                total_impressions += impressions
+                total_clicks += clicks
+                total_reach += reach
+
+        avg_ctr = round((total_clicks / total_impressions * 100) if total_impressions > 0 else 0, 2)
+        avg_cpc = round((total_spend / total_clicks) if total_clicks > 0 else 0, 2)
+
+        return {
+            "platform": "meta",
+            "last_synced": datetime.utcnow().isoformat(),
+            "summary": {
+                "total_campaigns": len(campaigns),
+                "total_spend": round(total_spend, 2),
+                "total_impressions": total_impressions,
+                "total_clicks": total_clicks,
+                "total_reach": total_reach,
+                "avg_ctr": avg_ctr,
+                "avg_cpc": avg_cpc,
+            },
+            "campaigns": campaigns,
+        }
+
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        logger.error(f"Failed to fetch Meta performance: {e}")
+        return {"platform": "meta", "error": str(e)}
 
 
 @router.post("/sync-meta", summary="Sync Meta Performance",
              description="Sync Meta Ads performance data and update database")
 def sync_meta_performance(db: Session = Depends(get_db)):
-    from app.services.meta_ads import MetaAdsService
-    meta = MetaAdsService()
-    try:
-        return meta.sync_performance(db)
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    # Reuse the meta-performance endpoint logic and update local campaign records
+    perf = get_meta_performance(db)
+    if "error" in perf:
+        return {"status": "error", "message": perf["error"]}
+
+    synced = 0
+    for meta_campaign in perf.get("campaigns", []):
+        local = db.query(CampaignModel).filter(
+            CampaignModel.platform_campaign_id == meta_campaign["id"]
+        ).first()
+        if local:
+            local.spend = meta_campaign["spend"]
+            local.status = meta_campaign["status"].lower()
+            synced += 1
+    db.commit()
+
+    return {"status": "synced", "campaigns_synced": synced, "summary": perf.get("summary")}
 
 
 @router.post("/fix-data", summary="Fix Database Data",

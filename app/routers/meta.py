@@ -20,6 +20,14 @@ META_APP_SECRET = os.environ.get("META_APP_SECRET", "")
 META_REDIRECT_URI = os.environ.get("META_REDIRECT_URI", "https://auto-sem.replit.app/api/v1/meta/callback")
 
 
+def _get_active_token(db: Session) -> str:
+    """Get the active Meta access token from DB or environment."""
+    token_record = db.query(MetaTokenModel).first()
+    if token_record and token_record.access_token:
+        return token_record.access_token
+    return os.environ.get("META_ACCESS_TOKEN", "")
+
+
 @router.get("/connect", summary="Connect Meta",
             description="Redirect to Meta OAuth authorization")
 def connect_meta():
@@ -49,7 +57,6 @@ def oauth_callback(
     if not code:
         return HTMLResponse(content="<h1>Error</h1><p>No auth code received</p>")
 
-    # Exchange code for access token
     try:
         token_url = (
             f"https://graph.facebook.com/v19.0/oauth/access_token"
@@ -66,7 +73,6 @@ def oauth_callback(
         if not short_token:
             return HTMLResponse(content="<h1>Error</h1><p>No token received</p>")
 
-        # Exchange for long-lived token
         long_url = (
             f"https://graph.facebook.com/v19.0/oauth/access_token"
             f"?grant_type=fb_exchange_token"
@@ -80,7 +86,6 @@ def oauth_callback(
 
         long_token = long_data.get("access_token", short_token)
 
-        # Save to DB
         existing = db.query(MetaTokenModel).first()
         if existing:
             existing.access_token = long_token
@@ -105,33 +110,63 @@ def oauth_callback(
 @router.get("/status", summary="Check Meta Status",
             description="Check current Meta token status")
 def check_meta_status(db: Session = Depends(get_db)):
-    token = db.query(MetaTokenModel).first()
-    if not token or not token.access_token:
+    access_token = _get_active_token(db)
+    if not access_token:
         return {"connected": False, "message": "No Meta token found"}
 
-    # Validate token
     try:
-        resp = requests.get(
-            f"https://graph.facebook.com/v19.0/me?access_token={token.access_token}",
+        # Debug token to get expiry and scopes
+        debug_resp = requests.get(
+            f"https://graph.facebook.com/v19.0/debug_token"
+            f"?input_token={access_token}"
+            f"&access_token={META_APP_ID}|{META_APP_SECRET}",
             timeout=10,
         )
-        if resp.status_code == 200:
+        debug_data = debug_resp.json().get("data", {}) if debug_resp.status_code == 200 else {}
+
+        # Calculate days remaining
+        days_remaining = None
+        expires_at = debug_data.get("expires_at", 0)
+        if expires_at:
+            import time
+            remaining_seconds = expires_at - time.time()
+            days_remaining = max(0, int(remaining_seconds / 86400))
+
+        scopes = debug_data.get("scopes", [])
+        is_valid = debug_data.get("is_valid", False)
+
+        if is_valid:
+            message = f"Token valid for {days_remaining} more days" if days_remaining else "Token valid"
             return {
                 "connected": True,
-                "token_type": token.token_type,
-                "updated_at": token.updated_at.isoformat() if token.updated_at else None,
+                "status": "healthy",
+                "days_remaining": days_remaining,
+                "scopes": scopes,
+                "message": message,
+                "refresh_url": None,
             }
         else:
             return {"connected": False, "message": "Token expired or invalid"}
+
     except Exception as e:
-        return {"connected": False, "message": str(e)}
+        # Fallback: just check if /me works
+        try:
+            resp = requests.get(
+                f"https://graph.facebook.com/v19.0/me?access_token={access_token}",
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return {"connected": True, "status": "healthy", "message": "Token valid"}
+            return {"connected": False, "message": "Token expired or invalid"}
+        except Exception as e2:
+            return {"connected": False, "message": str(e2)}
 
 
 @router.post("/refresh", summary="Refresh Meta Token",
              description="Refresh the current Meta access token")
 def refresh_meta_token(db: Session = Depends(get_db)):
-    token = db.query(MetaTokenModel).first()
-    if not token or not token.access_token:
+    access_token = _get_active_token(db)
+    if not access_token:
         return {"status": "error", "message": "No token to refresh"}
 
     try:
@@ -140,7 +175,7 @@ def refresh_meta_token(db: Session = Depends(get_db)):
             f"?grant_type=fb_exchange_token"
             f"&client_id={META_APP_ID}"
             f"&client_secret={META_APP_SECRET}"
-            f"&fb_exchange_token={token.access_token}"
+            f"&fb_exchange_token={access_token}"
         )
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
@@ -148,7 +183,15 @@ def refresh_meta_token(db: Session = Depends(get_db)):
 
         new_token = data.get("access_token")
         if new_token:
-            token.access_token = new_token
+            token_record = db.query(MetaTokenModel).first()
+            if token_record:
+                token_record.access_token = new_token
+            else:
+                token_record = MetaTokenModel(
+                    access_token=new_token,
+                    token_type="long_lived",
+                )
+                db.add(token_record)
             db.commit()
             return {"status": "refreshed"}
 
