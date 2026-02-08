@@ -12,6 +12,8 @@
         .header h1 { font-size: 2.2em; margin-bottom: 6px; }
         .header p { font-size: 1.1em; opacity: 0.9; }
 
+        .error-banner { background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px; margin-bottom: 20px; border: 1px solid #f5c6cb; display: none; }
+
         .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
         .metric-card { background: white; padding: 22px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); text-align: center; transition: transform 0.2s; }
         .metric-card:hover { transform: translateY(-3px); }
@@ -81,15 +83,17 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>AutoSEM Dashboard</h1>
+            <h1>&#128640; AutoSEM Dashboard</h1>
             <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine</p>
         </div>
+
+        <div id="error-banner" class="error-banner"></div>
 
         <div class="metrics-grid" id="top-metrics">
             <div class="metric-card"><div class="metric-value neutral">--</div><div class="metric-label">Today Spend</div></div>
             <div class="metric-card"><div class="metric-value neutral">--</div><div class="metric-label">Today Revenue</div></div>
             <div class="metric-card"><div class="metric-value neutral">--</div><div class="metric-label">Today ROAS</div></div>
-            <div class="metric-card"><div class="metric-value neutral">--</div><div class="metric-label">Active Campaigns</div></div>
+            <div class="metric-card"><div class="metric-value neutral">--</div><div class="metric-label">Today Orders</div></div>
         </div>
 
         <div class="status-actions-row">
@@ -101,9 +105,9 @@
             <div class="status-card">
                 <h2 style="margin-bottom:12px">Quick Actions</h2>
                 <div class="actions-grid">
-                    <button class="action-btn blue" onclick="viewReports()">&#128202; View Reports</button>
+                    <button class="action-btn blue" onclick="viewReports()">&#128202; View Full Reports</button>
                     <button class="action-btn green" onclick="syncProducts()">&#128722; Sync Products</button>
-                    <button class="action-btn red" onclick="pauseAll()">&#9208;&#65039; Pause All</button>
+                    <button class="action-btn red" onclick="pauseAll()">&#9208;&#65039; Pause All Campaigns</button>
                     <button class="action-btn gray" onclick="refreshAll()">&#128260; Refresh Data</button>
                 </div>
             </div>
@@ -142,10 +146,24 @@
     <script>
         const API = '/api/v1';
 
+        function showError(msg) {
+            const banner = document.getElementById('error-banner');
+            banner.textContent = msg;
+            banner.style.display = 'block';
+            setTimeout(() => { banner.style.display = 'none'; }, 15000);
+        }
+
+        function hideError() {
+            document.getElementById('error-banner').style.display = 'none';
+        }
+
         async function loadDashboardStatus() {
             try {
                 const res = await fetch(`${API}/dashboard/status`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const d = await res.json();
+
+                hideError();
                 const grid = document.getElementById('top-metrics');
                 const roas = d.roas_today || 0;
                 const roasClass = roas >= 2 ? 'positive' : roas >= 1 ? 'warning' : 'negative';
@@ -153,14 +171,20 @@
                     <div class="metric-card"><div class="metric-value neutral">$${(d.spend_today || 0).toFixed(2)}</div><div class="metric-label">Today Spend</div></div>
                     <div class="metric-card"><div class="metric-value positive">$${(d.revenue_today || 0).toFixed(2)}</div><div class="metric-label">Today Revenue</div></div>
                     <div class="metric-card"><div class="metric-value ${roasClass}">${roas.toFixed(1)}x</div><div class="metric-label">Today ROAS</div></div>
-                    <div class="metric-card"><div class="metric-value neutral">${d.active_campaigns || 0}</div><div class="metric-label">Active Campaigns</div></div>
+                    <div class="metric-card"><div class="metric-value neutral">${d.orders_today || 0}</div><div class="metric-label">Today Orders</div></div>
                 `;
-                const dot = document.getElementById('status-dot');
-                dot.className = 'status-dot ' + (d.status === 'operational' ? 'ok' : 'warn');
+
+                const statusClass = d.status === 'operational' ? 'ok' : d.status === 'degraded' ? 'warn' : 'ok';
+                document.getElementById('status-dot').className = 'status-dot ' + statusClass;
                 document.getElementById('system-status').textContent = d.status || 'Unknown';
                 document.getElementById('last-opt').textContent = `Last optimization: ${d.last_optimization || '--'}`;
                 document.getElementById('actions-today').textContent = `Actions today: ${d.actions_today || 0}`;
-            } catch(e) { console.error('Status load failed:', e); }
+
+                if (d.error) showError(`Dashboard running in degraded mode: ${d.error}`);
+            } catch(e) {
+                showError(`Failed to load dashboard data: ${e.message}`);
+                console.error('Status load failed:', e);
+            }
         }
 
         async function loadMetaPerformance() {
@@ -279,12 +303,12 @@
         function viewReports() { window.open('/docs', '_blank'); }
         async function syncProducts() {
             try {
-                const res = await fetch(`${API}/products/sync`, { method: 'POST' });
+                const res = await fetch(`${API}/products/sync-shopify`, { method: 'POST' });
                 const d = await res.json();
                 alert(`Synced ${d.synced || d.products_synced || 0} products`);
             } catch(e) { alert('Sync failed: ' + e.message); }
         }
-        function refreshAll() { loadDashboardStatus(); loadMetaPerformance(); loadGooglePerformance(); loadActivity(); }
+        function refreshAll() { hideError(); loadDashboardStatus(); loadMetaPerformance(); loadGooglePerformance(); loadActivity(); }
         refreshAll();
         setInterval(refreshAll, 60000);
     </script>
