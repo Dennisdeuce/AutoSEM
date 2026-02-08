@@ -135,6 +135,8 @@ class MetaAdsService:
         # Add interest targeting
         interests = targeting.get("interests", [])
         if interests:
+            # These would need to be resolved to Meta interest IDs
+            # For now, use tennis-related interest IDs
             spec["flexible_spec"] = [{
                 "interests": [
                     {"id": "6003384912200", "name": "Tennis"},
@@ -230,6 +232,7 @@ class MetaAdsService:
 
             results = []
             for row in data:
+                # Extract purchase conversions and revenue from actions
                 conversions = 0
                 revenue = 0.0
                 for action in row.get("actions", []):
