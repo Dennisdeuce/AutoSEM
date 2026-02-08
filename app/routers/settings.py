@@ -1,9 +1,11 @@
 """
 Settings API router - System configuration
 """
+
 import logging
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
+
 from app.database import get_db, SettingsModel
 
 logger = logging.getLogger("AutoSEM.Settings")
@@ -16,11 +18,15 @@ DEFAULT_SETTINGS = {
     "emergency_pause_loss": "500.0",
 }
 
-def _get_setting(db, key, default=None):
-    s = db.query(SettingsModel).filter(SettingsModel.key == key).first()
-    return s.value if s else default
 
-def _set_setting(db, key, value):
+def _get_setting(db: Session, key: str, default: str = None) -> str:
+    s = db.query(SettingsModel).filter(SettingsModel.key == key).first()
+    if s:
+        return s.value
+    return default
+
+
+def _set_setting(db: Session, key: str, value: str):
     s = db.query(SettingsModel).filter(SettingsModel.key == key).first()
     if s:
         s.value = value
@@ -29,7 +35,9 @@ def _set_setting(db, key, value):
         db.add(s)
     db.commit()
 
-@router.get("/")
+
+@router.get("/", summary="Get Settings",
+            description="Get current system settings")
 def get_settings(db: Session = Depends(get_db)):
     return {
         "daily_spend_limit": float(_get_setting(db, "daily_spend_limit", DEFAULT_SETTINGS["daily_spend_limit"])),
@@ -38,8 +46,11 @@ def get_settings(db: Session = Depends(get_db)):
         "emergency_pause_loss": float(_get_setting(db, "emergency_pause_loss", DEFAULT_SETTINGS["emergency_pause_loss"])),
     }
 
-@router.put("/")
+
+@router.put("/", summary="Update Settings",
+            description="Update system settings")
 def update_settings(settings_update: dict, db: Session = Depends(get_db)):
     for key, value in settings_update.items():
         _set_setting(db, key, str(value))
+    logger.info(f"Settings updated: {list(settings_update.keys())}")
     return get_settings(db)
