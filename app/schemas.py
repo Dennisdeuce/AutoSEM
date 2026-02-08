@@ -30,7 +30,6 @@ class ProductCreate(ProductBase):
 
 class Product(ProductBase):
     id: int
-
     class Config:
         from_attributes = True
 
@@ -66,7 +65,6 @@ class CampaignUpdate(CampaignBase):
 
 class Campaign(CampaignBase):
     id: int
-
     class Config:
         from_attributes = True
 

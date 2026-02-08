@@ -25,11 +25,11 @@ logger = logging.getLogger("AutoSEM")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
-    logger.info("\ud83d\ude80 AutoSEM starting up...")
+    logger.info("🚀 AutoSEM starting up...")
     Base.metadata.create_all(bind=engine)
-    logger.info("\u2705 Database tables created")
+    logger.info("✅ Database tables created")
     yield
-    logger.info("\ud83d\udc4b AutoSEM shutting down...")
+    logger.info("👋 AutoSEM shutting down...")
 
 
 app = FastAPI(
