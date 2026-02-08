@@ -1,6 +1,4 @@
-"""
-Products API router - Shopify product sync and management
-"""
+# Products API router - Shopify product sync and management
 
 import os
 import json
