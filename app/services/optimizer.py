@@ -186,6 +186,7 @@ class CampaignOptimizer:
 
         # Check daily spend limit
         if total_daily_budget > self.settings["daily_spend_limit"]:
+            # Scale down all budgets proportionally
             scale_factor = self.settings["daily_spend_limit"] / total_daily_budget
             for c in campaigns:
                 if c.daily_budget:
