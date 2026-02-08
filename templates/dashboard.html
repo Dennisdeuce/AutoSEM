@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoSEM Orchestrator - Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+        .header { background: linear-gradient(135deg, #1e293b, #334155); padding: 24px 32px; border-bottom: 1px solid #475569; }
+        .header h1 { font-size: 24px; font-weight: 700; color: #f1f5f9; }
+        .header p { color: #94a3b8; margin-top: 4px; font-size: 14px; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+        .status-bar { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; padding: 16px; background: #1e293b; border-radius: 12px; border: 1px solid #334155; }
+        .status-indicator { width: 12px; height: 12px; border-radius: 50%; }
+        .status-indicator.running { background: #22c55e; box-shadow: 0 0 8px #22c55e; animation: pulse 2s infinite; }
+        .status-indicator.paused { background: #eab308; }
+        .status-indicator.stopped { background: #ef4444; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .status-text { font-weight: 600; font-size: 16px; }
+        .btn { padding: 8px 20px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer; font-size: 14px; transition: all 0.2s; }
+        .btn-primary { background: #3b82f6; color: white; }
+        .btn-primary:hover { background: #2563eb; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-success { background: #22c55e; color: white; }
+        .btn-success:hover { background: #16a34a; }
+        .btn-outline { background: transparent; border: 1px solid #475569; color: #94a3b8; }
+        .btn-outline:hover { border-color: #3b82f6; color: #3b82f6; }
+        .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .metric-card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
+        .metric-label { color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .metric-value { font-size: 28px; font-weight: 700; margin-top: 4px; color: #f1f5f9; }
+        .metric-value.positive { color: #22c55e; }
+        .metric-value.negative { color: #ef4444; }
+        .metric-value.warning { color: #eab308; }
+        .section { background: #1e293b; border-radius: 12px; border: 1px solid #334155; margin-bottom: 24px; overflow: hidden; }
+        .section-header { padding: 16px 20px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
+        .section-header h2 { font-size: 16px; font-weight: 600; }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; padding: 12px 20px; color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #334155; }
+        td { padding: 12px 20px; border-bottom: 1px solid #1e293b; font-size: 14px; }
+        tr:hover { background: #334155; }
+        .badge { display: inline-block; padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: 600; }
+        .badge-active { background: #22c55e20; color: #22c55e; }
+        .badge-paused { background: #eab30820; color: #eab308; }
+        .badge-draft { background: #64748b20; color: #94a3b8; }
+        .badge-google { background: #4285f420; color: #4285f4; }
+        .badge-meta { background: #1877f220; color: #1877f2; }
+        .activity-log { max-height: 300px; overflow-y: auto; padding: 16px 20px; }
+        .activity-item { padding: 8px 0; border-bottom: 1px solid #334155; font-size: 13px; }
+        .activity-item:last-child { border-bottom: none; }
+        .activity-time { color: #64748b; font-size: 11px; }
+        .controls { display: flex; gap: 8px; margin-left: auto; }
+        .loading { text-align: center; padding: 40px; color: #64748b; }
+        .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid #475569; border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.8s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>&#x1F680; AutoSEM Orchestrator</h1>
+        <p>Automated SEM Campaign Engine for Court Sportswear</p>
+    </div>
+
+    <div class="container">
+        <!-- Status Bar -->
+        <div class="status-bar" id="statusBar">
+            <div class="status-indicator stopped" id="statusDot"></div>
+            <span class="status-text" id="statusText">Loading...</span>
+            <div class="controls">
+                <button class="btn btn-outline" onclick="runCycle()">&#x25b6; Run Cycle</button>
+                <button class="btn btn-success" onclick="startEngine()" id="startBtn">Start Engine</button>
+                <button class="btn btn-danger" onclick="pauseAll()" id="pauseBtn">Pause All</button>
+            </div>
+        </div>
+
+        <!-- Key Metrics -->
+        <div class="metrics-grid" id="metricsGrid">
+            <div class="metric-card">
+                <div class="metric-label">Total Campaigns</div>
+                <div class="metric-value" id="totalCampaigns">-</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Active</div>
+                <div class="metric-value positive" id="activeCampaigns">-</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Total Spend</div>
+                <div class="metric-value" id="totalSpend">-</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Total Revenue</div>
+                <div class="metric-value positive" id="totalRevenue">-</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">ROAS</div>
+                <div class="metric-value" id="overallRoas">-</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Conversions</div>
+                <div class="metric-value" id="totalConversions">-</div>
+            </div>
+        </div>
+
+        <!-- Campaigns Table -->
+        <div class="section">
+            <div class="section-header">
+                <h2>&#x1F4CA; Campaigns</h2>
+                <button class="btn btn-outline" onclick="refreshData()">&#x21bb; Refresh</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Campaign</th>
+                        <th>Platform</th>
+                        <th>Status</th>
+                        <th>Budget/Day</th>
+                        <th>Spend</th>
+                        <th>Revenue</th>
+                        <th>ROAS</th>
+                        <th>Clicks</th>
+                    </tr>
+                </thead>
+                <tbody id="campaignsTable">
+                    <tr><td colspan="8" class="loading"><div class="spinner"></div></td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="section">
+            <div class="section-header">
+                <h2>&#x1F4CB; Activity Log</h2>
+            </div>
+            <div class="activity-log" id="activityLog">
+                <div class="loading"><div class="spinner"></div></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';
+
+        async function fetchStatus() {
+            try {
+                const res = await fetch(`${API_BASE}/api/dashboard/status`);
+                const data = await res.json();
+                
+                const dot = document.getElementById('statusDot');
+                const text = document.getElementById('statusText');
+                
+                if (data.engine_running) {
+                    dot.className = 'status-indicator running';
+                    text.textContent = 'Engine Running';
+                } else if (data.status === 'paused') {
+                    dot.className = 'status-indicator paused';
+                    text.textContent = 'Paused';
+                } else {
+                    dot.className = 'status-indicator stopped';
+                    text.textContent = 'Stopped';
+                }
+
+                document.getElementById('totalCampaigns').textContent = data.total_campaigns || 0;
+                document.getElementById('activeCampaigns').textContent = data.active_campaigns || 0;
+                document.getElementById('totalSpend').textContent = `$${(data.total_spend || 0).toFixed(2)}`;
+                document.getElementById('totalRevenue').textContent = `$${(data.total_revenue || 0).toFixed(2)}`;
+                
+                const roas = data.overall_roas || 0;
+                const roasEl = document.getElementById('overallRoas');
+                roasEl.textContent = `${roas.toFixed(2)}x`;
+                roasEl.className = `metric-value ${roas >= 1.5 ? 'positive' : roas >= 1 ? 'warning' : 'negative'}`;
+                
+                document.getElementById('totalConversions').textContent = data.total_conversions || 0;
+            } catch(e) {
+                console.error('Failed to fetch status:', e);
+            }
+        }
+
+        async function fetchCampaigns() {
+            try {
+                const res = await fetch(`${API_BASE}/api/dashboard/campaign-performance`);
+                const data = await res.json();
+                const campaigns = data.campaigns || [];
+                
+                const tbody = document.getElementById('campaignsTable');
+                if (campaigns.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#64748b;padding:24px">No campaigns yet. Click "Run Cycle" to generate campaigns.</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = campaigns.map(c => `
+                    <tr>
+                        <td>${c.campaign_name || c.name || '-'}</td>
+                        <td><span class="badge badge-${c.platform}">${(c.platform || '').toUpperCase()}</span></td>
+                        <td><span class="badge badge-${c.status}">${c.status}</span></td>
+                        <td>$${(c.daily_budget || 0).toFixed(2)}</td>
+                        <td>$${(c.total_spend || 0).toFixed(2)}</td>
+                        <td>$${(c.total_revenue || 0).toFixed(2)}</td>
+                        <td>${(c.roas || 0).toFixed(2)}x</td>
+                        <td>${c.clicks || 0}</td>
+                    </tr>
+                `).join('');
+            } catch(e) {
+                console.error('Failed to fetch campaigns:', e);
+            }
+        }
+
+        async function fetchActivity() {
+            try {
+                const res = await fetch(`${API_BASE}/api/dashboard/activity?limit=20`);
+                const data = await res.json();
+                const logs = data.logs || data.activity || [];
+                
+                const container = document.getElementById('activityLog');
+                if (logs.length === 0) {
+                    container.innerHTML = '<div style="color:#64748b;padding:12px">No activity yet.</div>';
+                    return;
+                }
+
+                container.innerHTML = logs.map(l => `
+                    <div class="activity-item">
+                        <div>${l.action}: ${l.details || ''}</div>
+                        <div class="activity-time">${l.timestamp || ''}</div>
+                    </div>
+                `).join('');
+            } catch(e) {
+                console.error('Failed to fetch activity:', e);
+            }
+        }
+
+        async function startEngine() {
+            try {
+                await fetch(`${API_BASE}/api/automation/start`, { method: 'POST' });
+                refreshData();
+            } catch(e) { alert('Failed to start engine'); }
+        }
+
+        async function pauseAll() {
+            if (!confirm('Pause all campaigns?')) return;
+            try {
+                await fetch(`${API_BASE}/api/dashboard/pause-all`, { method: 'POST' });
+                refreshData();
+            } catch(e) { alert('Failed to pause'); }
+        }
+
+        async function runCycle() {
+            try {
+                const res = await fetch(`${API_BASE}/api/automation/run-cycle`, { method: 'POST' });
+                const data = await res.json();
+                alert(`Cycle complete!\n${JSON.stringify(data, null, 2)}`);
+                refreshData();
+            } catch(e) { alert('Failed to run cycle'); }
+        }
+
+        function refreshData() {
+            fetchStatus();
+            fetchCampaigns();
+            fetchActivity();
+        }
+
+        // Initial load
+        refreshData();
+        // Auto-refresh every 30s
+        setInterval(refreshData, 30000);
+    </script>
+</body>
+</html>
