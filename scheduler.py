@@ -46,7 +46,6 @@ def start_scheduler():
         name="AutoSEM Optimization Cycle",
         replace_existing=True,
     )
-
     scheduler.add_job(
         sync_performance,
         trigger=IntervalTrigger(hours=2),
@@ -54,7 +53,6 @@ def start_scheduler():
         name="Performance Data Sync",
         replace_existing=True,
     )
-
     scheduler.start()
     logger.info("AutoSEM scheduler started")
 

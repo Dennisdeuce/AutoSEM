@@ -1,21 +1,12 @@
 """Test that all dependencies are installed correctly."""
 import sys
 
-
 def test_imports():
     modules = [
-        ("fastapi", "FastAPI"),
-        ("uvicorn", "Uvicorn"),
-        ("sqlalchemy", "SQLAlchemy"),
-        ("pydantic", "Pydantic"),
-        ("httpx", "HTTPX"),
-        ("jinja2", "Jinja2"),
-        ("dotenv", "python-dotenv"),
+        ("fastapi", "FastAPI"), ("uvicorn", "Uvicorn"), ("sqlalchemy", "SQLAlchemy"),
+        ("pydantic", "Pydantic"), ("httpx", "HTTPX"), ("jinja2", "Jinja2"), ("dotenv", "python-dotenv"),
     ]
-
-    passed = 0
-    failed = 0
-
+    passed = failed = 0
     for module, name in modules:
         try:
             __import__(module)
@@ -24,10 +15,8 @@ def test_imports():
         except ImportError:
             print(f"  \u2717 {name} - NOT INSTALLED")
             failed += 1
-
     print(f"\n{passed}/{passed + failed} dependencies available")
     return failed == 0
-
 
 def test_app_import():
     try:
@@ -37,7 +26,6 @@ def test_app_import():
     except Exception as e:
         print(f"  \u2717 App failed to load: {e}")
         return False
-
 
 if __name__ == "__main__":
     print("AutoSEM Installation Test\n")

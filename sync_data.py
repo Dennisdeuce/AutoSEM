@@ -12,7 +12,6 @@ logger = logging.getLogger("autosem.sync")
 
 
 def sync_shopify_products():
-    """Sync products from Shopify store."""
     try:
         import httpx
         base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
@@ -26,7 +25,6 @@ def sync_shopify_products():
 
 
 def sync_google_performance():
-    """Sync performance data from Google Ads."""
     try:
         import httpx
         base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
@@ -40,7 +38,6 @@ def sync_google_performance():
 
 
 def full_sync():
-    """Run a full data sync."""
     logger.info(f"Starting full sync at {datetime.utcnow().isoformat()}")
     products = sync_shopify_products()
     performance = sync_google_performance()
