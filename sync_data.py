@@ -1,68 +1,61 @@
-#!/usr/bin/env python3
 """
-Data sync script for AutoSEM
-Syncs products, orders, and costs from external APIs
+AutoSEM Data Sync
+Utility for syncing product and campaign data from external sources.
 """
-import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import sys
+import logging
+from datetime import datetime
 
-from app.db.session import SessionLocal
-from app.services.shopify import shopify_service
-from app.services.printful import printful_service
-from app.crud import product
-from app.schemas.product import ProductCreate
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("autosem.sync")
 
 
-def sync_products():
-    """Sync products from Shopify and update costs from Printful"""
-    db = SessionLocal()
+def sync_shopify_products():
+    """Sync products from Shopify store."""
     try:
-        print("Fetching products from Shopify...")
-        shopify_products = shopify_service.get_products()
-
-        for shopify_prod in shopify_products:
-            # Check if product already exists
-            existing = product.get_by_shopify_id(db, shopify_id=str(shopify_prod["id"]))
-
-            # Get cost from Printful (simplified - would need proper mapping)
-            cost_price = printful_service.calculate_total_cost(str(shopify_prod["id"]))
-
-            product_data = shopify_service.transform_product_to_schema(shopify_prod)
-            product_data.cost_price = cost_price
-
-            if product_data.price and cost_price:
-                product_data.gross_margin = product_data.price - cost_price
-
-            if existing:
-                # Update existing product
-                product.update(db, db_obj=existing, obj_in=product_data)
-                print(f"Updated product: {product_data.title}")
-            else:
-                # Create new product
-                product.create(db, obj_in=product_data)
-                print(f"Created product: {product_data.title}")
-
-        print(f"Synced {len(shopify_products)} products")
-
-    finally:
-        db.close()
+        import httpx
+        base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
+        response = httpx.post(f"{base_url}/api/products/sync-shopify", timeout=60)
+        data = response.json()
+        logger.info(f"Shopify sync: {data}")
+        return data
+    except Exception as e:
+        logger.error(f"Shopify sync failed: {e}")
+        return None
 
 
-def sync_orders():
-    """Sync recent orders from Shopify"""
-    db = SessionLocal()
+def sync_google_performance():
+    """Sync performance data from Google Ads."""
     try:
-        print("Fetching recent orders from Shopify...")
-        # Implementation would sync orders and update campaign performance
-        orders = shopify_service.get_orders(limit=50)
-        print(f"Synced {len(orders)} orders")
-    finally:
-        db.close()
+        import httpx
+        base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
+        response = httpx.post(f"{base_url}/api/automation/sync-performance", timeout=60)
+        data = response.json()
+        logger.info(f"Google performance sync: {data}")
+        return data
+    except Exception as e:
+        logger.error(f"Google sync failed: {e}")
+        return None
+
+
+def full_sync():
+    """Run a full data sync."""
+    logger.info(f"Starting full sync at {datetime.utcnow().isoformat()}")
+    products = sync_shopify_products()
+    performance = sync_google_performance()
+    logger.info("Full sync complete")
+    return {"products": products, "performance": performance}
 
 
 if __name__ == "__main__":
-    print("Starting AutoSEM data sync...")
-    sync_products()
-    sync_orders()
-    print("Data sync complete!")
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        if cmd == "products":
+            sync_shopify_products()
+        elif cmd == "performance":
+            sync_google_performance()
+        else:
+            full_sync()
+    else:
+        full_sync()
