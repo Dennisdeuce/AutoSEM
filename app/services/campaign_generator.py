@@ -184,7 +184,7 @@ class CampaignGenerator:
         else:  # Meta
             return {
                 "headline": f"{title}",
-                "primary_text": f"{benefit} with {title} from Court Sportswear. Premium tennis {category} for players who demand the best. \ud83c\udfbe",
+                "primary_text": f"{benefit} with {title} from Court Sportswear. Premium tennis {category} for players who demand the best. 🎾",
                 "description": f"Shop now - {price_text}" if price_text else "Shop the collection",
                 "cta": "SHOP_NOW",
                 "link": product.url or "https://court-sportswear.com",
