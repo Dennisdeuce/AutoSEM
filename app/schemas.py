@@ -6,6 +6,8 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 
+# --- Products ---
+
 class ProductBase(BaseModel):
     shopify_id: str
     title: str
@@ -30,9 +32,12 @@ class ProductCreate(ProductBase):
 
 class Product(ProductBase):
     id: int
+
     class Config:
         from_attributes = True
 
+
+# --- Campaigns ---
 
 class CampaignBase(BaseModel):
     platform: str
@@ -65,9 +70,12 @@ class CampaignUpdate(CampaignBase):
 
 class Campaign(CampaignBase):
     id: int
+
     class Config:
         from_attributes = True
 
+
+# --- Settings ---
 
 class SettingsResponse(BaseModel):
     daily_spend_limit: float = 200.0
@@ -75,6 +83,8 @@ class SettingsResponse(BaseModel):
     min_roas_threshold: float = 1.5
     emergency_pause_loss: float = 500.0
 
+
+# --- Meta ---
 
 class TokenUpdate(BaseModel):
     access_token: str

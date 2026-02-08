@@ -23,11 +23,9 @@ class GoogleAdsService:
 
     @property
     def is_configured(self) -> bool:
-        """Check if Google Ads credentials are configured."""
         return bool(self.customer_id and self.developer_token)
 
     def _get_client(self):
-        """Initialize Google Ads API client."""
         if self._client:
             return self._client
 
@@ -55,15 +53,6 @@ class GoogleAdsService:
             return None
 
     def create_campaign(self, campaign_config: Dict) -> Dict:
-        """
-        Create a Google Ads search campaign.
-        
-        Args:
-            campaign_config: Dict with campaign_name, daily_budget, keywords, ad_copy, targeting
-        
-        Returns:
-            Dict with external campaign ID and status
-        """
         client = self._get_client()
         if not client:
             return self._simulate_create(campaign_config)
@@ -72,7 +61,6 @@ class GoogleAdsService:
             campaign_service = client.get_service("CampaignService")
             campaign_budget_service = client.get_service("CampaignBudgetService")
 
-            # Create budget
             budget_operation = client.get_type("CampaignBudgetOperation")
             budget = budget_operation.create
             budget.name = f"AutoSEM Budget - {campaign_config['campaign_name']}"
@@ -85,18 +73,15 @@ class GoogleAdsService:
             )
             budget_resource = budget_response.results[0].resource_name
 
-            # Create campaign
             campaign_operation = client.get_type("CampaignOperation")
             campaign = campaign_operation.create
             campaign.name = campaign_config["campaign_name"]
             campaign.campaign_budget = budget_resource
             campaign.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.SEARCH
-            campaign.status = client.enums.CampaignStatusEnum.PAUSED  # Start paused
+            campaign.status = client.enums.CampaignStatusEnum.PAUSED
 
-            # Set bidding strategy
             campaign.target_roas.target_roas = campaign_config.get("target_roas", 1.5)
 
-            # Set network settings
             campaign.network_settings.target_google_search = True
             campaign.network_settings.target_search_network = False
 
@@ -126,14 +111,12 @@ class GoogleAdsService:
             }
 
     def update_campaign_budget(self, external_id: str, new_budget: float) -> Dict:
-        """Update a campaign's daily budget."""
         client = self._get_client()
         if not client:
             return {"success": True, "simulated": True, "new_budget": new_budget}
 
         try:
             campaign_service = client.get_service("CampaignService")
-            # Implementation would update the campaign budget
             logger.info(f"Updated budget for campaign {external_id}: ${new_budget}")
             return {"success": True, "external_id": external_id, "new_budget": new_budget}
         except Exception as e:
@@ -141,7 +124,6 @@ class GoogleAdsService:
             return {"success": False, "error": str(e)}
 
     def pause_campaign(self, external_id: str) -> Dict:
-        """Pause a Google Ads campaign."""
         client = self._get_client()
         if not client:
             return {"success": True, "simulated": True, "status": "paused"}
@@ -167,25 +149,16 @@ class GoogleAdsService:
             return {"success": False, "error": str(e)}
 
     def enable_campaign(self, external_id: str) -> Dict:
-        """Enable (unpause) a Google Ads campaign."""
         client = self._get_client()
         if not client:
             return {"success": True, "simulated": True, "status": "enabled"}
 
         try:
-            # Similar to pause but with ENABLED status
             return {"success": True, "status": "enabled"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     def get_performance(self, external_id: str = None, days: int = 7) -> List[Dict]:
-        """
-        Fetch campaign performance data.
-        
-        Args:
-            external_id: Specific campaign ID, or None for all
-            days: Number of days to look back
-        """
         client = self._get_client()
         if not client:
             return self._simulate_performance(external_id, days)
@@ -234,7 +207,6 @@ class GoogleAdsService:
             return []
 
     def _simulate_create(self, config: Dict) -> Dict:
-        """Simulate campaign creation when API not available."""
         import random
         sim_id = f"sim_{random.randint(10000, 99999)}"
         logger.info(f"Simulated Google Ads campaign creation: {sim_id}")
@@ -247,6 +219,5 @@ class GoogleAdsService:
         }
 
     def _simulate_performance(self, external_id: str = None, days: int = 7) -> List[Dict]:
-        """Return empty performance when API not available."""
         logger.info("Google Ads API not configured - no performance data")
         return []

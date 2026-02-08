@@ -25,7 +25,6 @@ class MetaAdsService:
 
     @property
     def is_configured(self) -> bool:
-        """Check if Meta Ads credentials are configured."""
         return bool(self.app_id and self.access_token and self.ad_account_id)
 
     def _api_url(self, endpoint: str) -> str:
@@ -35,23 +34,15 @@ class MetaAdsService:
         return {"Authorization": f"Bearer {self.access_token}"}
 
     def update_token(self, token: str):
-        """Update the access token (e.g., after OAuth refresh)."""
         self.access_token = token
 
     def create_campaign(self, campaign_config: Dict) -> Dict:
-        """
-        Create a Meta Ads campaign.
-        
-        Args:
-            campaign_config: Dict with campaign_name, daily_budget, ad_copy, targeting
-        """
         if not self.is_configured:
             return self._simulate_create(campaign_config)
 
         try:
             import httpx
 
-            # Step 1: Create Campaign
             campaign_data = {
                 "name": campaign_config["campaign_name"],
                 "objective": "OUTCOME_SALES",
@@ -67,7 +58,6 @@ class MetaAdsService:
             response.raise_for_status()
             campaign_id = response.json()["id"]
 
-            # Step 2: Create Ad Set
             daily_budget_cents = int(campaign_config.get("daily_budget", 10) * 100)
             targeting = campaign_config.get("targeting", {})
 
@@ -115,7 +105,6 @@ class MetaAdsService:
             }
 
     def _build_targeting_spec(self, targeting: Dict) -> str:
-        """Build Meta targeting spec JSON string."""
         import json
 
         age_range = targeting.get("age_range", "25-55")
@@ -132,11 +121,8 @@ class MetaAdsService:
             "instagram_positions": ["stream", "story"],
         }
 
-        # Add interest targeting
         interests = targeting.get("interests", [])
         if interests:
-            # These would need to be resolved to Meta interest IDs
-            # For now, use tennis-related interest IDs
             spec["flexible_spec"] = [{
                 "interests": [
                     {"id": "6003384912200", "name": "Tennis"},
@@ -147,7 +133,6 @@ class MetaAdsService:
         return json.dumps(spec)
 
     def update_campaign_budget(self, adset_id: str, new_budget: float) -> Dict:
-        """Update an ad set's daily budget."""
         if not self.is_configured:
             return {"success": True, "simulated": True, "new_budget": new_budget}
 
@@ -167,7 +152,6 @@ class MetaAdsService:
             return {"success": False, "error": str(e)}
 
     def pause_campaign(self, campaign_id: str) -> Dict:
-        """Pause a Meta campaign."""
         if not self.is_configured:
             return {"success": True, "simulated": True, "status": "paused"}
 
@@ -187,7 +171,6 @@ class MetaAdsService:
             return {"success": False, "error": str(e)}
 
     def enable_campaign(self, campaign_id: str) -> Dict:
-        """Enable (activate) a Meta campaign."""
         if not self.is_configured:
             return {"success": True, "simulated": True, "status": "active"}
 
@@ -207,7 +190,6 @@ class MetaAdsService:
             return {"success": False, "error": str(e)}
 
     def get_performance(self, campaign_id: str = None, days: int = 7) -> List[Dict]:
-        """Fetch campaign performance insights."""
         if not self.is_configured:
             return []
 
@@ -232,7 +214,6 @@ class MetaAdsService:
 
             results = []
             for row in data:
-                # Extract purchase conversions and revenue from actions
                 conversions = 0
                 revenue = 0.0
                 for action in row.get("actions", []):
@@ -259,7 +240,6 @@ class MetaAdsService:
             return []
 
     def get_account_info(self) -> Dict:
-        """Get Meta ad account info."""
         if not self.is_configured:
             return {"configured": False}
 
@@ -279,7 +259,6 @@ class MetaAdsService:
             return {"configured": True, "error": str(e)}
 
     def refresh_access_token(self) -> Optional[str]:
-        """Exchange short-lived token for long-lived token."""
         if not self.app_id or not self.app_secret or not self.access_token:
             return None
 
@@ -306,7 +285,6 @@ class MetaAdsService:
             return None
 
     def _simulate_create(self, config: Dict) -> Dict:
-        """Simulate campaign creation when API not available."""
         import random
         sim_id = f"meta_sim_{random.randint(10000, 99999)}"
         logger.info(f"Simulated Meta campaign creation: {sim_id}")

@@ -1,4 +1,6 @@
-# Products API router - Shopify product sync and management
+"""
+Products API router - Shopify product sync and management
+"""
 
 import os
 import json
@@ -49,7 +51,6 @@ def read_product(product_id: int, db: Session = Depends(get_db)):
 @router.post("/sync-shopify", summary="Sync Shopify Products",
              description="Sync products from Shopify store")
 def sync_shopify_products(db: Session = Depends(get_db)):
-    """Pull all products from Shopify and upsert into local DB"""
     shop_url = os.environ.get("SHOPIFY_STORE_URL", "court-sportswear.myshopify.com")
     access_token = os.environ.get("SHOPIFY_ACCESS_TOKEN", "")
 

@@ -39,6 +39,7 @@ def sync_performance():
 
 def start_scheduler():
     """Start the background scheduler."""
+    # Run optimization every 6 hours
     scheduler.add_job(
         run_optimization_cycle,
         trigger=IntervalTrigger(hours=6),
@@ -46,6 +47,8 @@ def start_scheduler():
         name="AutoSEM Optimization Cycle",
         replace_existing=True,
     )
+
+    # Sync performance every 2 hours
     scheduler.add_job(
         sync_performance,
         trigger=IntervalTrigger(hours=2),
@@ -53,6 +56,7 @@ def start_scheduler():
         name="Performance Data Sync",
         replace_existing=True,
     )
+
     scheduler.start()
     logger.info("AutoSEM scheduler started")
 

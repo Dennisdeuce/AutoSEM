@@ -49,7 +49,6 @@ def oauth_callback(
     if not code:
         return HTMLResponse(content="<h1>Error</h1><p>No auth code received</p>")
 
-    # Exchange code for access token
     try:
         token_url = (
             f"https://graph.facebook.com/v19.0/oauth/access_token"
@@ -66,7 +65,6 @@ def oauth_callback(
         if not short_token:
             return HTMLResponse(content="<h1>Error</h1><p>No token received</p>")
 
-        # Exchange for long-lived token
         long_url = (
             f"https://graph.facebook.com/v19.0/oauth/access_token"
             f"?grant_type=fb_exchange_token"
@@ -80,7 +78,6 @@ def oauth_callback(
 
         long_token = long_data.get("access_token", short_token)
 
-        # Save to DB
         existing = db.query(MetaTokenModel).first()
         if existing:
             existing.access_token = long_token
@@ -93,12 +90,12 @@ def oauth_callback(
             db.add(token_record)
         db.commit()
 
-        logger.info("\u2705 Meta OAuth token saved successfully")
-        return HTMLResponse(content=\"\"\"
-            <h1>\u2705 Meta Connected!</h1>
+        logger.info("✅ Meta OAuth token saved successfully")
+        return HTMLResponse(content="""
+            <h1>✅ Meta Connected!</h1>
             <p>Long-lived token saved. You can close this window.</p>
             <script>setTimeout(() => window.close(), 3000)</script>
-        \"\"\")
+        """)
 
     except Exception as e:
         logger.error(f"Meta OAuth failed: {e}")
@@ -112,7 +109,6 @@ def check_meta_status(db: Session = Depends(get_db)):
     if not token or not token.access_token:
         return {"connected": False, "message": "No Meta token found"}
 
-    # Validate token
     try:
         resp = requests.get(
             f"https://graph.facebook.com/v19.0/me?access_token={token.access_token}",

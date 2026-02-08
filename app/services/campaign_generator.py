@@ -20,7 +20,6 @@ class CampaignGenerator:
         self.settings = self._load_settings()
 
     def _load_settings(self) -> dict:
-        """Load current settings from DB."""
         settings = self.db.query(SettingsModel).first()
         if settings:
             return {
@@ -37,15 +36,6 @@ class CampaignGenerator:
         }
 
     def generate_campaigns(self, platform: str = "both") -> List[Dict]:
-        """
-        Generate campaign configs for products that don't have campaigns yet.
-        
-        Args:
-            platform: 'google', 'meta', or 'both'
-        
-        Returns:
-            List of created campaign dicts
-        """
         products = self.db.query(ProductModel).filter(
             ProductModel.status == "active"
         ).all()
@@ -79,35 +69,23 @@ class CampaignGenerator:
         return created
 
     def _create_campaign_for_product(self, product: ProductModel, platform: str) -> Optional[Dict]:
-        """Create a single campaign for a product on a platform."""
-        # Calculate budget based on product price and margins
         product_price = product.price or 0
         if product_price <= 0:
             logger.warning(f"Skipping product {product.id} - no price set")
             return None
 
-        # Estimate margin (print-on-demand typical: 40-60%)
         estimated_margin = product_price * 0.45
-        # Daily budget = margin / min_roas to ensure profitability
         daily_budget = round(estimated_margin / self.settings["min_roas_threshold"], 2)
-        # Cap at reasonable per-campaign limit
         daily_budget = min(daily_budget, 25.0)
         daily_budget = max(daily_budget, 5.0)
 
-        # Generate campaign name
         title_short = (product.title or "Product")[:50]
         campaign_name = f"AutoSEM - {title_short} - {platform.title()}"
 
-        # Generate ad copy
         ad_copy = self._generate_ad_copy(product, platform)
-
-        # Build keywords for Google
         keywords = self._generate_keywords(product) if platform == "google" else []
-
-        # Determine targeting
         targeting = self._generate_targeting(product, platform)
 
-        # Create campaign record
         campaign = CampaignModel(
             product_id=product.id,
             platform=platform,
@@ -148,10 +126,8 @@ class CampaignGenerator:
         return result
 
     def _generate_ad_copy(self, product: ProductModel, platform: str) -> Dict:
-        """Generate ad copy for a product."""
         title = product.title or "Tennis Apparel"
         
-        # Extract key product attributes
         is_hat = any(w in title.lower() for w in ["hat", "cap", "visor"])
         is_shirt = any(w in title.lower() for w in ["shirt", "tee", "polo", "top"])
         is_shorts = any(w in title.lower() for w in ["shorts", "skirt", "skort"])
@@ -181,7 +157,7 @@ class CampaignGenerator:
                 "display_url": "court-sportswear.com",
                 "final_url": product.url or "https://court-sportswear.com",
             }
-        else:  # Meta
+        else:
             return {
                 "headline": f"{title}",
                 "primary_text": f"{benefit} with {title} from Court Sportswear. Premium tennis {category} for players who demand the best. 🎾",
@@ -191,14 +167,9 @@ class CampaignGenerator:
             }
 
     def _generate_keywords(self, product: ProductModel) -> List[str]:
-        """Generate Google Ads keywords for a product."""
         title = (product.title or "").lower()
         keywords = []
 
-        # Base tennis keywords
-        base_terms = ["tennis", "court", "tennis apparel", "tennis clothing"]
-
-        # Product-specific keywords
         if any(w in title for w in ["hat", "cap", "visor"]):
             keywords.extend([
                 "tennis hat", "tennis cap", "tennis visor",
@@ -220,10 +191,8 @@ class CampaignGenerator:
                 "court sportswear", "tennis outfit",
             ])
 
-        # Add brand keywords
         keywords.extend(["court sportswear", "court tennis"])
 
-        # Add title words as phrase match
         title_words = [w for w in title.split() if len(w) > 3 and w not in ("with", "from", "this", "that")]
         for word in title_words[:5]:
             keywords.append(f"tennis {word}")
@@ -231,7 +200,6 @@ class CampaignGenerator:
         return list(set(keywords))
 
     def _generate_targeting(self, product: ProductModel, platform: str) -> Dict:
-        """Generate audience targeting config."""
         base_targeting = {
             "age_range": "25-55",
             "gender": "all",
@@ -246,7 +214,7 @@ class CampaignGenerator:
                 "bid_strategy": "target_roas",
                 "target_roas": self.settings["min_roas_threshold"],
             })
-        else:  # Meta
+        else:
             base_targeting.update({
                 "placements": ["facebook_feed", "instagram_feed", "instagram_stories"],
                 "optimization_goal": "CONVERSIONS",

@@ -14,12 +14,11 @@ logger = logging.getLogger("autosem.optimizer")
 class CampaignOptimizer:
     """Optimizes campaigns based on performance data."""
 
-    # Thresholds for optimization decisions
     MIN_IMPRESSIONS_FOR_DECISION = 100
     MIN_CLICKS_FOR_DECISION = 10
-    LOW_CTR_THRESHOLD = 0.005  # 0.5%
-    HIGH_CTR_THRESHOLD = 0.03  # 3%
-    LOW_CONVERSION_RATE = 0.01  # 1%
+    LOW_CTR_THRESHOLD = 0.005
+    HIGH_CTR_THRESHOLD = 0.03
+    LOW_CONVERSION_RATE = 0.01
     BUDGET_INCREASE_FACTOR = 1.25
     BUDGET_DECREASE_FACTOR = 0.75
     MAX_DAILY_BUDGET = 50.0
@@ -46,7 +45,6 @@ class CampaignOptimizer:
         }
 
     def optimize_all(self) -> Dict:
-        """Run optimization across all active campaigns."""
         campaigns = self.db.query(CampaignModel).filter(
             CampaignModel.status.in_(["active", "live"])
         ).all()
@@ -59,7 +57,6 @@ class CampaignOptimizer:
             campaign_actions = self._optimize_campaign(campaign)
             actions.extend(campaign_actions)
 
-        # Check global safety limits
         safety_actions = self._check_safety_limits(campaigns)
         actions.extend(safety_actions)
 
@@ -72,10 +69,8 @@ class CampaignOptimizer:
         }
 
     def _optimize_campaign(self, campaign: CampaignModel) -> List[Dict]:
-        """Optimize a single campaign based on its performance."""
         actions = []
 
-        # Not enough data yet
         if (campaign.impressions or 0) < self.MIN_IMPRESSIONS_FOR_DECISION:
             return [{
                 "campaign_id": campaign.id,
@@ -83,7 +78,6 @@ class CampaignOptimizer:
                 "reason": f"Insufficient data ({campaign.impressions} impressions, need {self.MIN_IMPRESSIONS_FOR_DECISION})",
             }]
 
-        # Calculate metrics
         impressions = campaign.impressions or 0
         clicks = campaign.clicks or 0
         conversions = campaign.conversions or 0
@@ -95,10 +89,8 @@ class CampaignOptimizer:
         roas = revenue / spend if spend > 0 else 0
         cpc = spend / clicks if clicks > 0 else 0
 
-        # === ROAS Optimization ===
-        if spend > 20:  # Enough spend to evaluate
+        if spend > 20:
             if roas >= self.settings["min_roas_threshold"] * 1.5:
-                # Great ROAS - increase budget
                 new_budget = min(
                     (campaign.daily_budget or 10) * self.BUDGET_INCREASE_FACTOR,
                     self.MAX_DAILY_BUDGET
@@ -114,7 +106,6 @@ class CampaignOptimizer:
                     self._log_activity(f"Budget increased for campaign {campaign.id}: ROAS {roas:.2f}x")
 
             elif roas < self.settings["min_roas_threshold"] and spend > 50:
-                # Poor ROAS - decrease budget
                 new_budget = max(
                     (campaign.daily_budget or 10) * self.BUDGET_DECREASE_FACTOR,
                     self.MIN_DAILY_BUDGET
@@ -129,7 +120,6 @@ class CampaignOptimizer:
                 self._log_activity(f"Budget decreased for campaign {campaign.id}: ROAS {roas:.2f}x")
 
             elif roas < 0.5 and spend > 100:
-                # Very poor ROAS - pause campaign
                 campaign.status = "paused"
                 actions.append({
                     "campaign_id": campaign.id,
@@ -138,7 +128,6 @@ class CampaignOptimizer:
                 })
                 self._log_activity(f"Campaign {campaign.id} paused: ROAS {roas:.2f}x after ${spend:.2f} spend")
 
-        # === CTR Optimization ===
         if clicks >= self.MIN_CLICKS_FOR_DECISION:
             if ctr < self.LOW_CTR_THRESHOLD:
                 actions.append({
@@ -155,7 +144,6 @@ class CampaignOptimizer:
                     "suggestion": "optimize_landing_page",
                 })
 
-        # === CPC Optimization ===
         if clicks > 0 and cpc > (campaign.daily_budget or 10) * 0.5:
             actions.append({
                 "campaign_id": campaign.id,
@@ -164,7 +152,6 @@ class CampaignOptimizer:
                 "suggestion": "adjust_bids",
             })
 
-        # Update campaign metrics timestamp
         campaign.updated_at = datetime.utcnow()
 
         if not actions:
@@ -177,16 +164,13 @@ class CampaignOptimizer:
         return actions
 
     def _check_safety_limits(self, campaigns: List[CampaignModel]) -> List[Dict]:
-        """Check global safety limits across all campaigns."""
         actions = []
 
         total_daily_budget = sum(c.daily_budget or 0 for c in campaigns)
         total_spend = sum(c.total_spend or 0 for c in campaigns)
         total_revenue = sum(c.total_revenue or 0 for c in campaigns)
 
-        # Check daily spend limit
         if total_daily_budget > self.settings["daily_spend_limit"]:
-            # Scale down all budgets proportionally
             scale_factor = self.settings["daily_spend_limit"] / total_daily_budget
             for c in campaigns:
                 if c.daily_budget:
@@ -197,7 +181,6 @@ class CampaignOptimizer:
             })
             self._log_activity(f"Global budget scaled: {scale_factor:.2f}x to stay within ${self.settings['daily_spend_limit']} daily limit")
 
-        # Check emergency loss threshold
         net_loss = total_spend - total_revenue
         if net_loss > self.settings["emergency_pause_loss"]:
             for c in campaigns:
@@ -211,7 +194,6 @@ class CampaignOptimizer:
         return actions
 
     def get_optimization_summary(self) -> Dict:
-        """Get a summary of campaign performance and recommendations."""
         campaigns = self.db.query(CampaignModel).all()
 
         total_spend = sum(c.total_spend or 0 for c in campaigns)
@@ -243,7 +225,6 @@ class CampaignOptimizer:
         }
 
     def _log_activity(self, message: str):
-        """Log an optimization activity."""
         log = ActivityLogModel(
             action="optimization",
             details=message,
