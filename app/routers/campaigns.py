@@ -43,10 +43,8 @@ def update_campaign(campaign_id: int, campaign: CampaignUpdate, db: Session = De
     db_campaign = db.query(CampaignModel).filter(CampaignModel.id == campaign_id).first()
     if not db_campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
-
     for key, val in campaign.dict(exclude_unset=True).items():
         setattr(db_campaign, key, val)
-
     db.commit()
     db.refresh(db_campaign)
     logger.info(f"Updated campaign {campaign_id}: {db_campaign.name}")
