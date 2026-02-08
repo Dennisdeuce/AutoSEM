@@ -24,6 +24,7 @@ from app.services.meta_ads import MetaAdsService
 logger = logging.getLogger("AutoSEM.Automation")
 router = APIRouter()
 
+# In-memory automation state
 _automation_state = {
     "is_running": True,
     "last_optimization": None,
@@ -58,6 +59,12 @@ def stop_automation() -> dict:
 @router.post("/run-cycle", summary="Run Automation Cycle",
              description="Manually trigger a full automation cycle")
 def run_automation_cycle(db: Session = Depends(get_db)) -> dict:
+    """Run a complete optimization cycle:
+    1. Sync products from Shopify
+    2. Create campaigns for uncovered products
+    3. Optimize existing campaigns
+    4. Sync performance data
+    """
     if not _automation_state["is_running"]:
         return {"status": "error", "message": "Automation is paused"}
 
@@ -66,6 +73,7 @@ def run_automation_cycle(db: Session = Depends(get_db)) -> dict:
         "steps": [],
     }
 
+    # Step 1: Check for products without campaigns
     try:
         generator = CampaignGenerator()
         new_campaigns = generator.create_for_uncovered_products(db)
@@ -73,6 +81,7 @@ def run_automation_cycle(db: Session = Depends(get_db)) -> dict:
     except Exception as e:
         results["steps"].append({"step": "create_campaigns", "error": str(e)})
 
+    # Step 2: Optimize existing campaigns
     try:
         optimizer = CampaignOptimizer()
         optimizations = optimizer.optimize_all(db)
@@ -80,6 +89,7 @@ def run_automation_cycle(db: Session = Depends(get_db)) -> dict:
     except Exception as e:
         results["steps"].append({"step": "optimize", "error": str(e)})
 
+    # Step 3: Check safety limits
     try:
         safety = _check_safety_limits(db)
         results["steps"].append({"step": "safety_check", **safety})
@@ -89,6 +99,7 @@ def run_automation_cycle(db: Session = Depends(get_db)) -> dict:
     _automation_state["last_optimization"] = datetime.utcnow().isoformat()
     results["cycle_end"] = datetime.utcnow().isoformat()
 
+    # Log activity
     log = ActivityLogModel(
         action="AUTOMATION_CYCLE",
         details=json.dumps(results, default=str),
@@ -126,10 +137,12 @@ def run_optimization(db: Session = Depends(get_db)) -> dict:
 @router.post("/push-live", summary="Push Campaigns Live",
              description="Push all pending campaigns to Google Ads and make them live")
 def push_campaigns_live(db: Session = Depends(get_db)) -> dict:
+    """Push campaigns that don't have platform_campaign_id to the ad platforms"""
     google_ads = GoogleAdsService()
     meta_ads = MetaAdsService()
     pushed = {"google_ads": 0, "meta": 0, "errors": []}
 
+    # Google Ads campaigns
     google_campaigns = db.query(CampaignModel).filter(
         CampaignModel.platform == "google_ads",
         CampaignModel.platform_campaign_id == None,
@@ -145,6 +158,7 @@ def push_campaigns_live(db: Session = Depends(get_db)) -> dict:
         except Exception as e:
             pushed["errors"].append(f"Google: {campaign.name}: {str(e)}")
 
+    # Meta campaigns
     meta_campaigns = db.query(CampaignModel).filter(
         CampaignModel.platform == "meta",
         CampaignModel.platform_campaign_id == None,
@@ -198,6 +212,7 @@ def update_meta_token(token_data: TokenUpdate, db: Session = Depends(get_db)) ->
 
 
 def _check_safety_limits(db: Session) -> dict:
+    """Check if spend is within safety thresholds"""
     from app.routers.settings import _get_setting, DEFAULT_SETTINGS
 
     daily_limit = float(_get_setting(db, "daily_spend_limit", DEFAULT_SETTINGS["daily_spend_limit"]))
@@ -208,6 +223,7 @@ def _check_safety_limits(db: Session) -> dict:
     net_loss = total_spend - total_revenue
 
     if net_loss >= emergency_limit:
+        # Emergency pause
         campaigns = db.query(CampaignModel).filter(CampaignModel.status == "active").all()
         for c in campaigns:
             c.status = "PAUSED"

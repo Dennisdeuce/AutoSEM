@@ -25,6 +25,7 @@ def get_dashboard_status(db: Session = Depends(get_db)):
     today_revenue = db.query(func.sum(CampaignModel.revenue)).scalar() or 0
     today_roas = today_revenue / today_spend if today_spend > 0 else 0
 
+    # Get actions today
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     actions_today = db.query(ActivityLogModel).filter(
         ActivityLogModel.timestamp >= today_start
@@ -206,10 +207,11 @@ def sync_meta_performance(db: Session = Depends(get_db)):
 @router.post("/fix-data", summary="Fix Database Data",
              description="Fix campaign data - delete unwanted campaigns and fix budgets")
 def fix_database_data(db: Session = Depends(get_db)):
+    # Fix any campaigns with null budgets
     fixed = 0
     campaigns = db.query(CampaignModel).filter(CampaignModel.daily_budget == None).all()
     for c in campaigns:
-        c.daily_budget = 1.03
+        c.daily_budget = 1.03  # Default budget
         fixed += 1
     db.commit()
 
