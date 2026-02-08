@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoSEM - Design Document</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; max-width: 800px; margin: 0 auto; padding: 40px 24px; line-height: 1.7; }
+        h1 { color: #f1f5f9; font-size: 32px; margin-bottom: 8px; }
+        h2 { color: #3b82f6; font-size: 22px; margin-top: 40px; margin-bottom: 12px; border-bottom: 1px solid #334155; padding-bottom: 8px; }
+        h3 { color: #94a3b8; font-size: 16px; margin-top: 24px; }
+        p { color: #cbd5e1; margin-bottom: 12px; }
+        code { background: #1e293b; padding: 2px 6px; border-radius: 4px; font-size: 14px; color: #22d3ee; }
+        pre { background: #1e293b; padding: 16px; border-radius: 8px; overflow-x: auto; margin: 16px 0; border: 1px solid #334155; }
+        pre code { background: none; padding: 0; }
+        ul, ol { margin: 12px 0 12px 24px; color: #cbd5e1; }
+        li { margin-bottom: 6px; }
+        a { color: #3b82f6; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+        .subtitle { color: #64748b; font-size: 16px; margin-bottom: 32px; }
+    </style>
+</head>
+<body>
+    <h1>🚀 AutoSEM Orchestrator</h1>
+    <p class="subtitle">Automated SEM Campaign Engine for Court Sportswear</p>
+
+    <h2>Overview</h2>
+    <p>AutoSEM is a fully automated search engine marketing orchestrator that manages Google Ads and Meta (Facebook/Instagram) advertising campaigns for Court Sportswear's print-on-demand tennis apparel business.</p>
+    <p>The system automatically syncs products from Shopify, generates optimized ad campaigns, manages budgets based on ROAS targets, and continuously optimizes performance - all with minimal manual intervention.</p>
+
+    <h2>Architecture</h2>
+    <h3>Core Stack</h3>
+    <ul>
+        <li><strong>Backend:</strong> Python / FastAPI</li>
+        <li><strong>Database:</strong> PostgreSQL (production) / SQLite (development)</li>
+        <li><strong>ORM:</strong> SQLAlchemy</li>
+        <li><strong>Deployment:</strong> Docker / Replit</li>
+        <li><strong>Integrations:</strong> Shopify API, Google Ads API, Meta Marketing API</li>
+    </ul>
+
+    <h3>System Flow</h3>
+    <pre><code>Shopify Products → AutoSEM Sync → Campaign Generator → Platform APIs
+                                                ↓
+                                    Performance Sync ← Google/Meta
+                                                ↓
+                                        Optimizer Engine
+                                                ↓
+                                    Budget/Bid Adjustments → Platform APIs</code></pre>
+
+    <h2>API Endpoints</h2>
+    <h3>Products <code>/api/products</code></h3>
+    <ul>
+        <li><code>GET /</code> - List all products</li>
+        <li><code>POST /sync-shopify</code> - Sync from Shopify store</li>
+        <li><code>POST /</code> - Create product manually</li>
+    </ul>
+
+    <h3>Campaigns <code>/api/campaigns</code></h3>
+    <ul>
+        <li><code>GET /</code> - List all campaigns</li>
+        <li><code>POST /</code> - Create campaign</li>
+        <li><code>PUT /{id}</code> - Update campaign</li>
+        <li><code>DELETE /{id}</code> - Delete campaign</li>
+    </ul>
+
+    <h3>Dashboard <code>/api/dashboard</code></h3>
+    <ul>
+        <li><code>GET /status</code> - System status and summary metrics</li>
+        <li><code>GET /metrics/daily</code> - Daily metrics breakdown</li>
+        <li><code>GET /campaign-performance</code> - Per-campaign performance</li>
+        <li><code>GET /activity</code> - Activity log</li>
+        <li><code>POST /pause-all</code> - Emergency pause all campaigns</li>
+        <li><code>POST /resume-all</code> - Resume all campaigns</li>
+    </ul>
+
+    <h3>Automation <code>/api/automation</code></h3>
+    <ul>
+        <li><code>GET /status</code> - Engine running status</li>
+        <li><code>POST /start</code> - Start automation engine</li>
+        <li><code>POST /stop</code> - Stop automation engine</li>
+        <li><code>POST /run-cycle</code> - Run one full optimization cycle</li>
+        <li><code>POST /create-campaigns</code> - Generate campaigns from products</li>
+        <li><code>POST /optimize</code> - Run optimization pass</li>
+        <li><code>POST /push-live</code> - Push draft campaigns to ad platforms</li>
+        <li><code>POST /sync-performance</code> - Pull latest performance data</li>
+    </ul>
+
+    <h3>Settings <code>/api/settings</code></h3>
+    <ul>
+        <li><code>GET /</code> - Current settings</li>
+        <li><code>PUT /</code> - Update settings</li>
+    </ul>
+
+    <h3>Meta OAuth <code>/api/meta</code></h3>
+    <ul>
+        <li><code>GET /connect</code> - Initiate Meta OAuth flow</li>
+        <li><code>GET /callback</code> - OAuth callback handler</li>
+        <li><code>GET /status</code> - Token status</li>
+        <li><code>POST /refresh</code> - Refresh access token</li>
+    </ul>
+
+    <h2>Safety Mechanisms</h2>
+    <ul>
+        <li><strong>Daily Spend Limit:</strong> $200/day across all campaigns</li>
+        <li><strong>Monthly Spend Limit:</strong> $5,000/month cap</li>
+        <li><strong>ROAS Threshold:</strong> Minimum 1.5x ROAS target</li>
+        <li><strong>Emergency Pause:</strong> Auto-pause all at $500 net loss</li>
+        <li><strong>Budget Scaling:</strong> Proportional budget reduction when limits approached</li>
+        <li><strong>Campaign Auto-Pause:</strong> Individual campaigns paused at 0.5x ROAS after $100 spend</li>
+    </ul>
+
+    <h2>Optimization Logic</h2>
+    <p>The optimizer evaluates each campaign on these dimensions:</p>
+    <ol>
+        <li><strong>ROAS Performance:</strong> Budget increases for &gt;2.25x ROAS, decreases for &lt;1.5x, pause at &lt;0.5x</li>
+        <li><strong>CTR Analysis:</strong> Flags campaigns with &lt;0.5% CTR for ad copy refresh</li>
+        <li><strong>Conversion Rate:</strong> Identifies landing page issues (high CTR + low conversion)</li>
+        <li><strong>CPC Monitoring:</strong> Alerts when CPC exceeds 50% of daily budget</li>
+    </ol>
+
+    <h2>Campaign Generation</h2>
+    <p>Campaigns are auto-generated from Shopify products with:</p>
+    <ul>
+        <li>Category-aware ad copy (hats, shirts, shorts, accessories)</li>
+        <li>Tennis-specific keyword generation for Google Ads</li>
+        <li>Interest-based targeting for Meta (tennis, racquet sports, athletic apparel)</li>
+        <li>Margin-aware budget allocation (45% estimated POD margin)</li>
+        <li>Dual-platform deployment (Google Search + Meta Feed/Stories)</li>
+    </ul>
+
+    <p style="color:#64748b;margin-top:48px;text-align:center">AutoSEM Orchestrator v1.0 — Court Sportswear</p>
+</body>
+</html>
