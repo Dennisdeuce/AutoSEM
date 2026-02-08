@@ -1,8 +1,10 @@
 """
 Pydantic schemas for AutoSEM API
 """
-from typing import Optional
+
+from typing import Optional, List
 from pydantic import BaseModel
+
 
 class ProductBase(BaseModel):
     shopify_id: str
@@ -21,12 +23,17 @@ class ProductBase(BaseModel):
     variants: Optional[str] = None
     tags: Optional[str] = None
 
-class ProductCreate(ProductBase): pass
+
+class ProductCreate(ProductBase):
+    pass
+
 
 class Product(ProductBase):
     id: int
+
     class Config:
         from_attributes = True
+
 
 class CampaignBase(BaseModel):
     platform: str
@@ -48,19 +55,28 @@ class CampaignBase(BaseModel):
     descriptions: Optional[str] = None
     keywords: Optional[str] = None
 
-class CampaignCreate(CampaignBase): pass
-class CampaignUpdate(CampaignBase): pass
+
+class CampaignCreate(CampaignBase):
+    pass
+
+
+class CampaignUpdate(CampaignBase):
+    pass
+
 
 class Campaign(CampaignBase):
     id: int
+
     class Config:
         from_attributes = True
+
 
 class SettingsResponse(BaseModel):
     daily_spend_limit: float = 200.0
     monthly_spend_limit: float = 5000.0
     min_roas_threshold: float = 1.5
     emergency_pause_loss: float = 500.0
+
 
 class TokenUpdate(BaseModel):
     access_token: str

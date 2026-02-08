@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./autosem.db")
 
+# Handle postgres:// vs postgresql://
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -28,6 +29,7 @@ def get_db():
 
 class ProductModel(Base):
     __tablename__ = "products"
+
     id = Column(Integer, primary_key=True, index=True)
     shopify_id = Column(String, unique=True, index=True, nullable=False)
     title = Column(String, nullable=False)
@@ -50,6 +52,7 @@ class ProductModel(Base):
 
 class CampaignModel(Base):
     __tablename__ = "campaigns"
+
     id = Column(Integer, primary_key=True, index=True)
     platform = Column(String, nullable=False)
     platform_campaign_id = Column(String, nullable=True)
@@ -75,6 +78,7 @@ class CampaignModel(Base):
 
 class ActivityLogModel(Base):
     __tablename__ = "activity_logs"
+
     id = Column(Integer, primary_key=True, index=True)
     action = Column(String, nullable=False)
     entity_type = Column(String, nullable=True)
@@ -85,6 +89,7 @@ class ActivityLogModel(Base):
 
 class SettingsModel(Base):
     __tablename__ = "settings"
+
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String, unique=True, nullable=False)
     value = Column(String, nullable=True)
@@ -93,6 +98,7 @@ class SettingsModel(Base):
 
 class MetaTokenModel(Base):
     __tablename__ = "meta_tokens"
+
     id = Column(Integer, primary_key=True, index=True)
     access_token = Column(Text, nullable=True)
     token_type = Column(String, default="long_lived")
