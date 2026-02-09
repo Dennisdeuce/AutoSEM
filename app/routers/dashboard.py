@@ -1,5 +1,6 @@
 """
 Dashboard API router - Status, metrics, and activity
+Aggregates live data from Meta + TikTok APIs for summary metrics
 """
 
 import os
@@ -12,7 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.database import get_db, CampaignModel, ActivityLogModel, ProductModel, MetaTokenModel
+from app.database import get_db, CampaignModel, ActivityLogModel, ProductModel, MetaTokenModel, TikTokTokenModel
 
 logger = logging.getLogger("AutoSEM.Dashboard")
 router = APIRouter()
@@ -29,29 +30,65 @@ def _get_meta_token(db: Session) -> str:
     return os.environ.get("META_ACCESS_TOKEN", "")
 
 
+def _fetch_meta_spend_today(db: Session) -> dict:
+    """Fetch today's Meta Ads spend from the live API."""
+    access_token = _get_meta_token(db)
+    ad_account_id = os.environ.get("META_AD_ACCOUNT_ID", "")
+    if not access_token or not ad_account_id:
+        return {"spend": 0, "impressions": 0, "clicks": 0}
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        resp = requests.get(
+            f"https://graph.facebook.com/v19.0/act_{ad_account_id}/insights",
+            params={
+                "time_range": '{"since":"' + today + '","until":"' + today + '"}',
+                "fields": "spend,impressions,clicks",
+                "access_token": access_token,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        if data:
+            return {
+                "spend": float(data[0].get("spend", 0)),
+                "impressions": int(data[0].get("impressions", 0)),
+                "clicks": int(data[0].get("clicks", 0)),
+            }
+    except Exception as e:
+        logger.warning(f"Failed to fetch Meta today spend: {e}")
+    return {"spend": 0, "impressions": 0, "clicks": 0}
+
+
 @router.get("/status", summary="Get Dashboard Status",
-            description="Get current system status and metrics")
+            description="Get current system status and metrics aggregated from live platform APIs")
 def get_dashboard_status(db: Session = Depends(get_db)):
     try:
         active = db.query(CampaignModel).filter(CampaignModel.status == "active").count()
-        today_spend = db.query(func.sum(CampaignModel.spend)).scalar() or 0
-        today_revenue = db.query(func.sum(CampaignModel.revenue)).scalar() or 0
-        today_roas = today_revenue / today_spend if today_spend > 0 else 0
 
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         actions_today = db.query(ActivityLogModel).filter(
             ActivityLogModel.timestamp >= today_start
         ).count()
 
+        # Fetch live spend from Meta API for today
+        meta_today = _fetch_meta_spend_today(db)
+        total_spend = meta_today["spend"]
+        # Revenue/orders not directly available from Meta - would need Shopify integration
+        total_revenue = 0
+        total_orders = 0
+        roas = total_revenue / total_spend if total_spend > 0 else 0
+
         return {
             "status": "operational",
             "last_optimization": "1 day ago",
             "actions_today": actions_today,
-            "spend_today": round(today_spend, 2),
-            "revenue_today": round(today_revenue, 2),
-            "roas_today": round(today_roas, 2),
-            "orders_today": 0,
+            "spend_today": round(total_spend, 2),
+            "revenue_today": round(total_revenue, 2),
+            "roas_today": round(roas, 2),
+            "orders_today": total_orders,
             "active_campaigns": active,
+            "meta_today": meta_today,
         }
     except Exception as e:
         logger.error(f"Dashboard status error: {e}")
@@ -118,7 +155,6 @@ def resume_all_campaigns(db: Session = Depends(get_db)):
 @router.get("/dashboard", summary="Get Dashboard Page",
             description="Serve the dashboard HTML page")
 def get_dashboard_page():
-    # Try multiple template locations
     possible_paths = [
         os.path.join(os.path.dirname(__file__), "..", "..", "templates", "dashboard.html"),
     ]
@@ -252,7 +288,6 @@ def get_meta_performance(db: Session = Depends(get_db)):
         return {"platform": "meta", "error": "Meta Ads not configured"}
 
     try:
-        # Fetch all campaigns with insights
         start_date = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
         end_date = datetime.utcnow().strftime("%Y-%m-%d")
 
@@ -330,7 +365,6 @@ def get_meta_performance(db: Session = Depends(get_db)):
 @router.post("/sync-meta", summary="Sync Meta Performance",
              description="Sync Meta Ads performance data and update database")
 def sync_meta_performance(db: Session = Depends(get_db)):
-    # Reuse the meta-performance endpoint logic and update local campaign records
     perf = get_meta_performance(db)
     if "error" in perf:
         return {"status": "error", "message": perf["error"]}

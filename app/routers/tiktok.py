@@ -4,7 +4,7 @@ import os
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from fastapi import APIRouter, Depends, Query, Request
@@ -176,10 +176,9 @@ def check_tiktok_status(db: Session = Depends(get_db)):
 
 
 @router.post("/launch-campaign", summary="Launch TikTok Ad Campaign",
-             description="Create a complete TikTok ad campaign with ad group and ads. "
-                         "TikTok minimum: $50/day campaign budget, $20/day ad group budget.")
+             description="Create a complete TikTok ad campaign with ad group and ads.")
 def launch_campaign(
-    daily_budget: float = Query(20.0, description="Daily budget in USD (TikTok min: $20 ad group, $50 campaign)"),
+    daily_budget: float = Query(20.0, description="Daily budget in USD (TikTok min: $20 ad group)"),
     campaign_name: str = Query("Court Sportswear - Tennis Apparel", description="Campaign name"),
     db: Session = Depends(get_db),
 ):
@@ -192,11 +191,13 @@ def launch_campaign(
     results = {"steps": []}
 
     # TikTok enforces minimum budgets
-    campaign_budget = max(daily_budget, 50.0)  # Campaign min: $50/day
-    adgroup_budget = max(daily_budget, 20.0)    # Ad group min: $20/day
+    adgroup_budget = max(daily_budget, 20.0)  # Ad group min: $20/day
+
+    # Schedule start time - 5 minutes from now in advertiser timezone format
+    schedule_start = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-        # ── Step 1: Create Campaign (no budget limit, control at ad group level) ──
+        # Step 1: Create Campaign with unlimited budget (control at ad group level)
         campaign_data = {
             "advertiser_id": advertiser_id,
             "campaign_name": campaign_name,
@@ -210,7 +211,7 @@ def launch_campaign(
         if camp_result.get("code") != 0:
             # Fallback: try with explicit $50 budget
             campaign_data["budget_mode"] = "BUDGET_MODE_DAY"
-            campaign_data["budget"] = campaign_budget
+            campaign_data["budget"] = 50.0
             camp_result = _tiktok_api("POST", "/campaign/create/", access_token, data=campaign_data)
             results["steps"].append({"step": "create_campaign_retry", "result": camp_result})
             if camp_result.get("code") != 0:
@@ -219,7 +220,7 @@ def launch_campaign(
         campaign_id = camp_result.get("data", {}).get("campaign_id")
         logger.info(f"Campaign created: {campaign_id}")
 
-        # ── Step 2: Create Ad Group with budget control ──
+        # Step 2: Create Ad Group with schedule_start_time
         adgroup_data = {
             "advertiser_id": advertiser_id,
             "campaign_id": campaign_id,
@@ -228,11 +229,12 @@ def launch_campaign(
             "budget_mode": "BUDGET_MODE_DAY",
             "budget": adgroup_budget,
             "schedule_type": "SCHEDULE_FROM_NOW",
+            "schedule_start_time": schedule_start,
             "optimization_goal": "CLICK",
             "bid_type": "BID_TYPE_NO_BID",
             "pacing": "PACING_MODE_SMOOTH",
             "operation_status": "ENABLE",
-            "location_ids": ["6252001"],  # United States
+            "location_ids": ["6252001"],
             "gender": "GENDER_UNLIMITED",
             "age_groups": ["AGE_25_34", "AGE_35_44", "AGE_45_54"],
         }
@@ -240,7 +242,7 @@ def launch_campaign(
         results["steps"].append({"step": "create_adgroup", "result": ag_result})
 
         if ag_result.get("code") != 0:
-            # Retry with minimal targeting
+            # Retry with minimal params
             adgroup_data_simple = {
                 "advertiser_id": advertiser_id,
                 "campaign_id": campaign_id,
@@ -249,6 +251,7 @@ def launch_campaign(
                 "budget_mode": "BUDGET_MODE_DAY",
                 "budget": adgroup_budget,
                 "schedule_type": "SCHEDULE_FROM_NOW",
+                "schedule_start_time": schedule_start,
                 "optimization_goal": "CLICK",
                 "bid_type": "BID_TYPE_NO_BID",
                 "pacing": "PACING_MODE_SMOOTH",
@@ -263,7 +266,7 @@ def launch_campaign(
         adgroup_id = ag_result.get("data", {}).get("adgroup_id")
         logger.info(f"Ad group created: {adgroup_id}")
 
-        # ── Step 3: Upload image and create ad ──
+        # Step 3: Upload image and create ad
         product_images = [
             "https://court-sportswear.com/cdn/shop/files/unisex-organic-cotton-t-shirt-black-front-2-6783d1ce12e89.png",
             "https://court-sportswear.com/cdn/shop/files/all-over-print-recycled-unisex-sports-jersey-white-front-2-6783c7c53d88f.png",
@@ -282,7 +285,6 @@ def launch_campaign(
                 logger.info(f"Image uploaded: {image_id}")
                 break
 
-        # Create ad
         ad_data = {
             "advertiser_id": advertiser_id,
             "adgroup_id": adgroup_id,
@@ -307,7 +309,7 @@ def launch_campaign(
             ad_id = ad_ids[0] if ad_ids else None
             logger.info(f"Ad created: {ad_id}")
 
-        # ── Step 4: Save to local database ──
+        # Step 4: Save to local database
         campaign_record = CampaignModel(
             platform="tiktok",
             platform_campaign_id=str(campaign_id),
@@ -367,7 +369,6 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
                     "objective": camp.get("objective_type"),
                 })
 
-        from datetime import timedelta
         end_date = datetime.utcnow().strftime("%Y-%m-%d")
         start_date = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
 
