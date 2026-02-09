@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import time
+import hashlib
 from datetime import datetime, timedelta
 
 import requests
@@ -66,25 +67,47 @@ def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
     return {}
 
 
+def _get_existing_images(access_token: str, advertiser_id: str) -> list:
+    """Get list of already-uploaded images from TikTok ad library."""
+    result = _tiktok_api("GET", "/file/image/ad/get/", access_token,
+                         params={"advertiser_id": advertiser_id, "page_size": 20})
+    if result.get("code") == 0:
+        return result.get("data", {}).get("list", [])
+    return []
+
+
 def _upload_image(access_token: str, advertiser_id: str, image_url: str) -> str:
+    """Upload image to TikTok. On duplicate, fetch from existing library."""
     upload_data = {
         "advertiser_id": advertiser_id,
         "upload_type": "UPLOAD_BY_URL",
         "image_url": image_url,
     }
     result = _tiktok_api("POST", "/file/image/ad/upload/", access_token, data=upload_data)
+
+    # Success
     if result.get("code") == 0:
         image_id = result.get("data", {}).get("image_id", "")
         if image_id:
+            logger.info(f"Image uploaded: {image_id}")
             return image_id
-    # Duplicate is OK - extract image_id from existing
+
+    # Duplicate - get from existing library
     if result.get("code") == 40911:
-        logger.info("Image already uploaded (duplicate)")
-    logger.warning(f"Image upload issue for {image_url}: {result.get('message')}")
+        logger.info("Duplicate image, fetching from library...")
+        existing = _get_existing_images(access_token, advertiser_id)
+        if existing:
+            # Return the most recent image
+            image_id = existing[0].get("image_id", "")
+            if image_id:
+                logger.info(f"Using existing image: {image_id}")
+                return image_id
+
+    logger.warning(f"Image upload failed for {image_url}: code={result.get('code')} msg={result.get('message')}")
     return ""
 
 
-def _get_product_images(access_token: str = None, advertiser_id: str = None) -> list:
+def _get_product_images() -> list:
     try:
         resp = requests.get("https://court-sportswear.com/products.json?limit=5", timeout=10)
         if resp.status_code == 200:
@@ -102,33 +125,6 @@ def _get_product_images(access_token: str = None, advertiser_id: str = None) -> 
     return PRODUCT_IMAGES
 
 
-def _generate_video_from_image(access_token: str, advertiser_id: str, image_id: str) -> str:
-    """Use TikTok's smart creative tool to generate a video from an image."""
-    # Try the creative/smart_video/create endpoint
-    video_data = {
-        "advertiser_id": advertiser_id,
-        "image_ids": [image_id],
-        "style_id": "1",  # Basic template
-    }
-    result = _tiktok_api("POST", "/creative/smart_video/create/", access_token, data=video_data)
-    if result.get("code") == 0:
-        task_id = result.get("data", {}).get("task_id", "")
-        if task_id:
-            # Poll for completion
-            for _ in range(10):
-                time.sleep(3)
-                check = _tiktok_api("GET", "/creative/smart_video/get/", access_token,
-                                    params={"advertiser_id": advertiser_id, "task_id": task_id})
-                if check.get("code") == 0:
-                    status = check.get("data", {}).get("status", "")
-                    if status == "SUCCESS":
-                        return check.get("data", {}).get("video_id", "")
-                    elif status == "FAILED":
-                        break
-    logger.warning(f"Video generation failed: {result.get('message')}")
-    return ""
-
-
 def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
                    image_id: str, identity: dict) -> dict:
     """Try multiple ad creation strategies until one works."""
@@ -137,92 +133,84 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
     display_name = identity.get("display_name", "Court Sportswear")
     attempts = []
 
-    # Attempt 1: SINGLE_IMAGE with TT_USER identity
+    base_creative = {
+        "ad_text": "Premium tennis & pickleball apparel. Performance caps, polos & more. Shop now!",
+        "landing_page_url": "https://court-sportswear.com/collections/all",
+        "call_to_action": "SHOP_NOW",
+    }
+
+    # Attempt 1: SINGLE_IMAGE with TT_USER
     if identity_id and image_id:
-        creative1 = {
-            "ad_name": "Court Sportswear - Tennis & Pickleball Gear",
-            "ad_text": "Premium tennis & pickleball apparel. Performance caps, polos & more. Shop now!",
-            "landing_page_url": "https://court-sportswear.com/collections/all",
-            "call_to_action": "SHOP_NOW",
+        creative = {**base_creative,
+            "ad_name": "Court Sportswear - Tennis Gear v1",
             "ad_format": "SINGLE_IMAGE",
             "identity_id": identity_id,
             "identity_type": identity_type,
             "image_ids": [image_id],
         }
-        result1 = _tiktok_api("POST", "/ad/create/", access_token, data={
+        result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
-            "creatives": [creative1], "operation_status": "ENABLE",
+            "creatives": [creative], "operation_status": "ENABLE",
         })
-        attempts.append({"attempt": "single_image_tt_user", "result": result1})
-        if result1.get("code") == 0:
-            return {"success": True, "ad_ids": result1.get("data", {}).get("ad_ids", []), "attempts": attempts}
+        attempts.append({"attempt": "single_image_tt_user", "result": result})
+        if result.get("code") == 0:
+            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []), "attempts": attempts}
 
-    # Attempt 2: SINGLE_IMAGE with display_name override (no identity)
-    if image_id:
-        creative2 = {
-            "ad_name": "Court Sportswear - Tennis Collection",
-            "ad_text": "Premium tennis & pickleball apparel. Performance caps, polos & more. Shop now!",
-            "landing_page_url": "https://court-sportswear.com/collections/all",
-            "call_to_action": "SHOP_NOW",
+    # Attempt 2: Add display_name and brand_name
+    if identity_id and image_id:
+        creative = {**base_creative,
+            "ad_name": "Court Sportswear - Tennis Gear v2",
             "ad_format": "SINGLE_IMAGE",
+            "identity_id": identity_id,
+            "identity_type": identity_type,
             "image_ids": [image_id],
             "display_name": display_name,
+            "brand_name": "Court Sportswear",
         }
-        if identity_id:
-            creative2["identity_id"] = identity_id
-            creative2["identity_type"] = identity_type
-        result2 = _tiktok_api("POST", "/ad/create/", access_token, data={
+        result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
-            "creatives": [creative2], "operation_status": "ENABLE",
+            "creatives": [creative], "operation_status": "ENABLE",
         })
-        attempts.append({"attempt": "single_image_display_name", "result": result2})
-        if result2.get("code") == 0:
-            return {"success": True, "ad_ids": result2.get("data", {}).get("ad_ids", []), "attempts": attempts}
+        attempts.append({"attempt": "image_with_brand", "result": result})
+        if result.get("code") == 0:
+            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []), "attempts": attempts}
 
-    # Attempt 3: CAROUSEL_IMAGE with TT_USER
+    # Attempt 3: Use profile_image from identity as avatar_icon_web_uri
     if identity_id and image_id:
-        creative3 = {
-            "ad_name": "Court Sportswear - Tennis Apparel",
-            "ad_text": "Premium tennis & pickleball apparel. Shop now!",
-            "landing_page_url": "https://court-sportswear.com/collections/all",
-            "call_to_action": "SHOP_NOW",
+        creative = {**base_creative,
+            "ad_name": "Court Sportswear - Tennis Gear v3",
             "ad_format": "SINGLE_IMAGE",
             "identity_id": identity_id,
             "identity_type": identity_type,
             "image_ids": [image_id],
-            "brand_name": "Court Sportswear",
+            "profile_image_url": "",
         }
-        result3 = _tiktok_api("POST", "/ad/create/", access_token, data={
+        result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
-            "creatives": [creative3], "operation_status": "ENABLE",
+            "creatives": [creative], "operation_status": "ENABLE",
         })
-        attempts.append({"attempt": "single_image_with_brand", "result": result3})
-        if result3.get("code") == 0:
-            return {"success": True, "ad_ids": result3.get("data", {}).get("ad_ids", []), "attempts": attempts}
+        attempts.append({"attempt": "image_with_profile", "result": result})
+        if result.get("code") == 0:
+            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []), "attempts": attempts}
 
-    # Attempt 4: Generate video from image, then create video ad
-    if image_id and identity_id:
-        video_id = _generate_video_from_image(access_token, advertiser_id, image_id)
-        attempts.append({"attempt": "video_generation", "video_id": video_id})
-        if video_id:
-            creative4 = {
-                "ad_name": "Court Sportswear - Tennis Video Ad",
-                "ad_text": "Premium tennis & pickleball apparel. Shop now!",
-                "landing_page_url": "https://court-sportswear.com/collections/all",
-                "call_to_action": "SHOP_NOW",
-                "ad_format": "SINGLE_VIDEO",
-                "identity_id": identity_id,
-                "identity_type": identity_type,
-                "video_id": video_id,
-                "image_ids": [image_id],  # thumbnail
-            }
-            result4 = _tiktok_api("POST", "/ad/create/", access_token, data={
-                "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
-                "creatives": [creative4], "operation_status": "ENABLE",
-            })
-            attempts.append({"attempt": "video_ad", "result": result4})
-            if result4.get("code") == 0:
-                return {"success": True, "ad_ids": result4.get("data", {}).get("ad_ids", []), "attempts": attempts}
+    # Attempt 4: Try without call_to_action (sometimes causes issues)
+    if identity_id and image_id:
+        creative = {
+            "ad_name": "Court Sportswear - Tennis Gear v4",
+            "ad_text": "Premium tennis & pickleball apparel. Shop now at court-sportswear.com",
+            "landing_page_url": "https://court-sportswear.com/collections/all",
+            "ad_format": "SINGLE_IMAGE",
+            "identity_id": identity_id,
+            "identity_type": identity_type,
+            "image_ids": [image_id],
+        }
+        result = _tiktok_api("POST", "/ad/create/", access_token, data={
+            "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
+            "creatives": [creative], "operation_status": "ENABLE",
+        })
+        attempts.append({"attempt": "image_no_cta", "result": result})
+        if result.get("code") == 0:
+            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []), "attempts": attempts}
 
     return {"success": False, "attempts": attempts}
 
@@ -298,18 +286,14 @@ def _exchange_token(auth_code: str, db: Session) -> dict:
         resp = requests.post(url, json=payload, timeout=30)
         resp.raise_for_status()
         result = resp.json()
-
         if result.get("code") != 0:
             return {"success": False, "error": result.get("message", "Token exchange failed"), "raw": result}
-
         data = result.get("data", {})
         access_token = data.get("access_token")
         advertiser_ids = data.get("advertiser_ids", [])
         advertiser_id = advertiser_ids[0] if advertiser_ids else ""
-
         if not access_token:
             return {"success": False, "error": "No access token in response", "raw": result}
-
         existing = db.query(TikTokTokenModel).first()
         if existing:
             existing.access_token = access_token
@@ -317,15 +301,11 @@ def _exchange_token(auth_code: str, db: Session) -> dict:
             existing.advertiser_ids = json.dumps(advertiser_ids)
             existing.updated_at = datetime.utcnow()
         else:
-            token_record = TikTokTokenModel(access_token=access_token, advertiser_id=advertiser_id, advertiser_ids=json.dumps(advertiser_ids))
-            db.add(token_record)
+            db.add(TikTokTokenModel(access_token=access_token, advertiser_id=advertiser_id, advertiser_ids=json.dumps(advertiser_ids)))
         db.commit()
-
-        log = ActivityLogModel(action="TIKTOK_CONNECTED", entity_type="tiktok", details=f"Connected TikTok. Advertiser ID: {advertiser_id}")
-        db.add(log)
+        db.add(ActivityLogModel(action="TIKTOK_CONNECTED", entity_type="tiktok", details=f"Connected. Advertiser ID: {advertiser_id}"))
         db.commit()
         return {"success": True, "advertiser_id": advertiser_id, "advertiser_ids": advertiser_ids, "_token": access_token}
-
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -339,8 +319,8 @@ def check_tiktok_status(db: Session = Depends(get_db)):
         result = _tiktok_api("GET", "/oauth2/advertiser/get/", creds["access_token"],
                             params={"app_id": TIKTOK_APP_ID, "secret": TIKTOK_APP_SECRET})
         if result.get("code") == 0:
-            advertisers = result.get("data", {}).get("list", [])
-            return {"connected": True, "advertiser_id": creds["advertiser_id"], "advertisers": advertisers, "message": "Connected"}
+            return {"connected": True, "advertiser_id": creds["advertiser_id"],
+                    "advertisers": result.get("data", {}).get("list", []), "message": "Connected"}
         return {"connected": False, "message": result.get("message", "API error")}
     except Exception as e:
         return {"connected": False, "message": str(e)}
@@ -363,7 +343,6 @@ def launch_campaign(
     schedule_start = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-        # Step 1: Create Campaign
         camp_result = _tiktok_api("POST", "/campaign/create/", access_token, data={
             "advertiser_id": advertiser_id, "campaign_name": campaign_name,
             "objective_type": "TRAFFIC", "budget_mode": "BUDGET_MODE_INFINITE", "operation_status": "ENABLE",
@@ -376,11 +355,10 @@ def launch_campaign(
             })
             results["steps"].append({"step": "create_campaign_retry", "result": camp_result})
             if camp_result.get("code") != 0:
-                return {"success": False, "error": f"Campaign creation failed: {camp_result.get('message')}", "details": results}
+                return {"success": False, "error": camp_result.get("message"), "details": results}
 
         campaign_id = camp_result.get("data", {}).get("campaign_id")
 
-        # Step 2: Create Ad Group
         ag_result = _tiktok_api("POST", "/adgroup/create/", access_token, data={
             "advertiser_id": advertiser_id, "campaign_id": campaign_id,
             "adgroup_name": f"{campaign_name} - Tennis Enthusiasts 25-55",
@@ -394,23 +372,10 @@ def launch_campaign(
         })
         results["steps"].append({"step": "create_adgroup", "result": ag_result})
         if ag_result.get("code") != 0:
-            ag_result = _tiktok_api("POST", "/adgroup/create/", access_token, data={
-                "advertiser_id": advertiser_id, "campaign_id": campaign_id,
-                "adgroup_name": f"{campaign_name} - Auto Targeting",
-                "placement_type": "PLACEMENT_TYPE_AUTOMATIC", "promotion_type": "WEBSITE",
-                "budget_mode": "BUDGET_MODE_DAY", "budget": adgroup_budget,
-                "schedule_type": "SCHEDULE_FROM_NOW", "schedule_start_time": schedule_start,
-                "billing_event": "OCPM", "optimization_goal": "CLICK",
-                "bid_type": "BID_TYPE_NO_BID", "pacing": "PACING_MODE_SMOOTH", "operation_status": "ENABLE",
-                "location_ids": ["6252001"],
-            })
-            results["steps"].append({"step": "create_adgroup_retry", "result": ag_result})
-            if ag_result.get("code") != 0:
-                return {"success": False, "error": f"Ad group failed: {ag_result.get('message')}", "details": results}
+            return {"success": False, "error": ag_result.get("message"), "details": results}
 
         adgroup_id = ag_result.get("data", {}).get("adgroup_id")
 
-        # Step 3: Upload image
         product_images = _get_product_images()
         image_id = ""
         for img_url in product_images[:3]:
@@ -419,11 +384,9 @@ def launch_campaign(
             if image_id:
                 break
 
-        # Step 4: Find identity
         identity = _find_best_identity(access_token, advertiser_id)
         results["steps"].append({"step": "find_identity", "result": identity})
 
-        # Step 5: Try multiple ad creation strategies
         ad_result = _try_create_ad(access_token, advertiser_id, adgroup_id, image_id, identity)
         results["steps"].append({"step": "create_ad", "result": ad_result})
 
@@ -433,13 +396,12 @@ def launch_campaign(
             ad_ids = ad_result.get("ad_ids", [])
             ad_id = ad_ids[0] if ad_ids else None
         else:
-            ad_warning = "Ad creation failed after multiple attempts. Campaign and ad group are live — create ad manually in TikTok Ads Manager."
+            ad_warning = "Ad creation failed. Campaign and ad group are live."
 
-        # Save to DB
         db.add(CampaignModel(platform="tiktok", platform_campaign_id=str(campaign_id),
                              name=campaign_name, status="ACTIVE", campaign_type="TRAFFIC", daily_budget=adgroup_budget))
         db.add(ActivityLogModel(action="TIKTOK_CAMPAIGN_LAUNCHED", entity_type="campaign", entity_id=str(campaign_id),
-                                details=f"Campaign: {campaign_id}, AdGroup: {adgroup_id}, Ad: {ad_id}, Budget: ${adgroup_budget}/day"))
+                                details=f"Campaign: {campaign_id}, AdGroup: {adgroup_id}, Ad: {ad_id}"))
         db.commit()
 
         response = {"success": True, "campaign_id": campaign_id, "adgroup_id": adgroup_id, "ad_id": ad_id,
@@ -475,8 +437,15 @@ def create_ad_for_adgroup(
         if image_id:
             break
 
+    # If all uploads failed (duplicates not resolved), try getting from library directly
     if not image_id:
-        return {"success": False, "error": "All image uploads failed", "details": results}
+        existing = _get_existing_images(access_token, advertiser_id)
+        if existing:
+            image_id = existing[0].get("image_id", "")
+            results["steps"].append({"step": "fallback_library", "image_id": image_id, "total_in_library": len(existing)})
+
+    if not image_id:
+        return {"success": False, "error": "No images available", "details": results}
 
     # Find identity
     identity = _find_best_identity(access_token, advertiser_id)
@@ -484,9 +453,9 @@ def create_ad_for_adgroup(
     if not identity.get("identity_id"):
         return {"success": False, "error": "No identity found. Link TikTok account in Ads Manager.", "details": results}
 
-    # Try multiple ad creation strategies
+    # Try multiple ad strategies
     ad_result = _try_create_ad(access_token, advertiser_id, adgroup_id, image_id, identity)
-    results["steps"].append({"step": "create_ad", "result": ad_result})
+    results["steps"].append({"step": "create_ad_attempts", "result": ad_result})
 
     if ad_result.get("success"):
         ad_ids = ad_result.get("ad_ids", [])
@@ -494,6 +463,16 @@ def create_ad_for_adgroup(
                 "identity": identity, "image_id": image_id, "details": results}
 
     return {"success": False, "error": "All ad creation attempts failed", "details": results}
+
+
+@router.get("/images", summary="List uploaded images")
+def list_images(db: Session = Depends(get_db)):
+    """List all images in TikTok ad library."""
+    creds = _get_active_token(db)
+    if not creds["access_token"]:
+        return {"error": "Not connected"}
+    images = _get_existing_images(creds["access_token"], creds["advertiser_id"])
+    return {"count": len(images), "images": images}
 
 
 @router.get("/identities", summary="List all TikTok identities")
@@ -539,7 +518,6 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
                 campaigns.append({"id": camp.get("campaign_id"), "name": camp.get("campaign_name"),
                                   "status": camp.get("operation_status"), "budget": camp.get("budget", 0),
                                   "objective": camp.get("objective_type")})
-
         end_date = datetime.utcnow().strftime("%Y-%m-%d")
         start_date = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
         stats_result = _tiktok_api("GET", "/report/integrated/get/", creds["access_token"], params={
@@ -554,7 +532,6 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
                 total_spend += float(m.get("spend", 0))
                 total_impressions += int(m.get("impressions", 0))
                 total_clicks += int(m.get("clicks", 0))
-
         return {"summary": {"total_campaigns": len(campaigns), "total_spend": round(total_spend, 2),
                             "total_impressions": total_impressions, "total_clicks": total_clicks,
                             "avg_ctr": round((total_clicks / total_impressions * 100) if total_impressions else 0, 2),
