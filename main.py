@@ -20,11 +20,12 @@ async def lifespan(app: FastAPI):
     logger.info("\U0001f680 AutoSEM starting up...")
     Base.metadata.create_all(bind=engine)
     logger.info("\u2705 Database tables created")
+    logger.info("\u2705 TikTok router loaded")
     yield
     logger.info("\U0001f44b AutoSEM shutting down...")
 
 
-app = FastAPI(title="AutoSEM", version="0.2.0", docs_url="/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
+app = FastAPI(title="AutoSEM", version="0.3.0", docs_url="/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -40,7 +41,7 @@ app.include_router(tiktok.router, prefix="/api/v1/tiktok", tags=["tiktok"])
 
 @app.get("/", summary="Root")
 async def root():
-    return {"message": "Welcome to AutoSEM", "dashboard": "/dashboard"}
+    return {"message": "Welcome to AutoSEM v0.3.0", "dashboard": "/dashboard", "tiktok_setup": "/tiktok-setup"}
 
 
 @app.get("/dashboard", summary="Dashboard", response_class=HTMLResponse)
@@ -58,7 +59,7 @@ async def dashboard_page():
 
 @app.get("/health", summary="Health Check")
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "version": "0.3.0", "tiktok_router": "loaded"}
 
 
 @app.get("/tiktok-setup", summary="TikTok Setup Page", response_class=HTMLResponse)
@@ -110,7 +111,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
 <body>
     <div class="container">
         <div class="card">
-            <h1>\U0001f3af TikTok Ads Setup</h1>
+            <h1>&#127919; TikTok Ads Setup</h1>
             <p class="subtitle">Connect your TikTok Business account and launch campaigns</p>
             <div id="status-check">Checking connection status...</div>
         </div>
@@ -121,7 +122,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
                 <h3>Option A: Auto-Connect (Recommended)</h3>
                 <p>Click the button below to authorize via TikTok OAuth flow:</p>
                 <br>
-                <a href="/api/v1/tiktok/connect" class="btn btn-primary">\U0001f517 Connect TikTok Account</a>
+                <a href="/api/v1/tiktok/connect" class="btn btn-primary">&#128279; Connect TikTok Account</a>
             </div>
             <div class="step">
                 <h3>Option B: Manual Auth Code</h3>
@@ -139,7 +140,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
                 <h3>Campaign Settings</h3>
                 <p>Daily Budget: $5.00 | Objective: Traffic | Target: US Tennis Enthusiasts 25-55</p>
             </div>
-            <button class="btn btn-success" onclick="launchCampaign()">\U0001f680 Launch $5/day Campaign</button>
+            <button class="btn btn-success" onclick="launchCampaign()">&#128640; Launch $5/day Campaign</button>
             <div id="launch-result"></div>
         </div>
 
@@ -156,9 +157,9 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
                 const data = await res.json();
                 const el = document.getElementById('status-check');
                 if (data.connected) {
-                    el.innerHTML = '<div class="status success">\u2705 TikTok Connected! Advertiser ID: ' + data.advertiser_id + '</div>';
+                    el.innerHTML = '<div class="status success">&#9989; TikTok Connected! Advertiser ID: ' + data.advertiser_id + '</div>';
                 } else {
-                    el.innerHTML = '<div class="status info">\U0001f50c Not connected yet. Complete Step 1 below.</div>';
+                    el.innerHTML = '<div class="status info">&#128268; Not connected yet. Complete Step 1 below.</div>';
                 }
             } catch(e) {
                 document.getElementById('status-check').innerHTML = '<div class="status error">Error checking status: ' + e.message + '</div>';
@@ -175,10 +176,10 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
                 const data = await res.json();
                 document.getElementById('result').textContent = JSON.stringify(data, null, 2);
                 if (data.success) {
-                    el.innerHTML = '<div class="status success">\u2705 Token saved! Advertiser ID: ' + data.advertiser_id + '</div>';
+                    el.innerHTML = '<div class="status success">&#9989; Token saved! Advertiser ID: ' + data.advertiser_id + '</div>';
                     checkStatus();
                 } else {
-                    el.innerHTML = '<div class="status error">\u274c ' + (data.error || 'Failed') + '</div>';
+                    el.innerHTML = '<div class="status error">&#10060; ' + (data.error || 'Failed') + '</div>';
                 }
             } catch(e) {
                 el.innerHTML = '<div class="status error">Error: ' + e.message + '</div>';
@@ -193,19 +194,17 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
                 const data = await res.json();
                 document.getElementById('result').textContent = JSON.stringify(data, null, 2);
                 if (data.success) {
-                    el.innerHTML = '<div class="status success">\u2705 Campaign launched! ID: ' + data.campaign_id + ' | Budget: $' + data.daily_budget + '/day</div>';
+                    el.innerHTML = '<div class="status success">&#9989; Campaign launched! ID: ' + data.campaign_id + ' | Budget: $' + data.daily_budget + '/day</div>';
                 } else {
-                    el.innerHTML = '<div class="status error">\u274c ' + (data.error || 'Failed') + '</div>';
+                    el.innerHTML = '<div class="status error">&#10060; ' + (data.error || 'Failed') + '</div>';
                 }
             } catch(e) {
                 el.innerHTML = '<div class="status error">Error: ' + e.message + '</div>';
             }
         }
 
-        // Check on load
         checkStatus();
 
-        // Auto-handle auth_code from URL if redirected here
         const urlParams = new URLSearchParams(window.location.search);
         const authCode = urlParams.get('auth_code');
         if (authCode) {
@@ -344,7 +343,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             <h2>Recent Activity</h2>
             <div id="activity-log"><div class="loading-msg"><div class="spinner"></div> Loading activity...</div></div>
         </div>
-        <div class="footer">AutoSEM v2.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
+        <div class="footer">AutoSEM v0.3.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
     </div>
     <script>
         const API = '/api/v1';
