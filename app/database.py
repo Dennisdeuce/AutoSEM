@@ -1,6 +1,4 @@
-"""
-Database configuration and SQLAlchemy models
-"""
+"""Database configuration and SQLAlchemy models"""
 
 import os
 from datetime import datetime
@@ -18,7 +16,6 @@ if DATABASE_URL.startswith("postgres://"):
 if "sqlite" in DATABASE_URL:
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
-    # PostgreSQL: recycle stale connections, pre-ping to detect dropped SSL
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,
@@ -116,5 +113,16 @@ class MetaTokenModel(Base):
     token_type = Column(String, default="long_lived")
     expires_at = Column(DateTime, nullable=True)
     ad_account_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TikTokTokenModel(Base):
+    __tablename__ = "tiktok_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    access_token = Column(Text, nullable=True)
+    advertiser_id = Column(String, nullable=True)
+    advertiser_ids = Column(Text, nullable=True)  # JSON list
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
