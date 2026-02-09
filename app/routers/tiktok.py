@@ -21,6 +21,13 @@ TIKTOK_APP_SECRET = os.environ.get("TIKTOK_APP_SECRET", "b2d479247984871ef1b6f26
 TIKTOK_REDIRECT_URI = os.environ.get("TIKTOK_REDIRECT_URI", "https://auto-sem.replit.app/api/v1/tiktok/callback")
 TIKTOK_API_BASE = "https://business-api.tiktok.com/open_api/v1.3"
 
+# Current working product image URLs from Shopify CDN
+PRODUCT_IMAGES = [
+    "https://cdn.shopify.com/s/files/1/0672/2030/8191/products/mens-tennis-hoodie-921535.jpg?v=1708170515",
+    "https://cdn.shopify.com/s/files/1/0672/2030/8191/products/mens-tennis-hoodie-404401.jpg?v=1708087650",
+    "https://cdn.shopify.com/s/files/1/0672/2030/8191/products/mens-performance-crew-neck-tennis-t-shirt-999403.jpg?v=1707157727",
+]
+
 
 def _get_active_token(db: Session) -> dict:
     """Get TikTok token from DB first, then fall back to env vars (Replit Secrets)."""
@@ -52,7 +59,6 @@ def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
     """Find the best available identity for ad creation.
     Priority: TT_USER (linked TikTok account) > BC_AUTH_TT > CUSTOMIZED_USER (deprecated)
     """
-    # Try TT_USER first (linked TikTok accounts)
     for identity_type in ["TT_USER", "BC_AUTH_TT", "CUSTOMIZED_USER"]:
         result = _tiktok_api("GET", "/identity/get/", access_token,
                              params={"advertiser_id": advertiser_id, "identity_type": identity_type})
@@ -62,14 +68,12 @@ def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
                 identity = identities[0]
                 logger.info(f"Found identity type={identity_type}, id={identity.get('identity_id')}")
                 return {"identity_id": identity.get("identity_id"), "identity_type": identity_type}
-
     logger.warning("No usable identity found")
     return {}
 
 
 def _upload_image(access_token: str, advertiser_id: str, image_url: str) -> str:
-    """Upload an image to TikTok. Try URL upload first, then download-and-upload as fallback."""
-    # Method 1: Upload by URL
+    """Upload an image to TikTok via URL."""
     upload_data = {
         "advertiser_id": advertiser_id,
         "upload_type": "UPLOAD_BY_URL",
@@ -81,37 +85,27 @@ def _upload_image(access_token: str, advertiser_id: str, image_url: str) -> str:
         if image_id:
             logger.info(f"Image uploaded via URL: {image_id}")
             return image_id
-
-    logger.warning(f"URL upload failed: {result.get('message')}. Trying download-and-upload...")
-
-    # Method 2: Download image then upload as file
-    try:
-        img_resp = requests.get(image_url, timeout=30)
-        img_resp.raise_for_status()
-        import hashlib
-        image_data = img_resp.content
-        image_sig = hashlib.md5(image_data).hexdigest()
-
-        url = f"{TIKTOK_API_BASE}/file/image/ad/upload/"
-        headers = {"Access-Token": access_token}
-        files = {"image_file": ("product.png", image_data, "image/png")}
-        form_data = {
-            "advertiser_id": advertiser_id,
-            "upload_type": "UPLOAD_BY_FILE",
-        }
-        resp = requests.post(url, headers=headers, data=form_data, files=files, timeout=60)
-        resp.raise_for_status()
-        file_result = resp.json()
-        if file_result.get("code") == 0:
-            image_id = file_result.get("data", {}).get("image_id", "")
-            if image_id:
-                logger.info(f"Image uploaded via file: {image_id}")
-                return image_id
-        logger.warning(f"File upload also failed: {file_result.get('message')}")
-    except Exception as e:
-        logger.error(f"Image download/upload failed: {e}")
-
+    logger.warning(f"Image upload failed for {image_url}: {result.get('message')}")
     return ""
+
+
+def _get_product_images(access_token: str, advertiser_id: str) -> list:
+    """Try to fetch fresh product images from Shopify, fall back to constants."""
+    try:
+        resp = requests.get("https://court-sportswear.com/products.json?limit=5", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            urls = []
+            for p in data.get("products", []):
+                for img in p.get("images", [])[:1]:
+                    src = img.get("src", "")
+                    if src:
+                        urls.append(src)
+            if urls:
+                return urls
+    except Exception as e:
+        logger.warning(f"Failed to fetch Shopify products: {e}")
+    return PRODUCT_IMAGES
 
 
 @router.get("/connect", summary="Connect TikTok")
@@ -333,13 +327,10 @@ def launch_campaign(
         adgroup_id = ag_result.get("data", {}).get("adgroup_id")
         logger.info(f"Ad group created: {adgroup_id}")
 
-        # Step 3: Upload product image
-        product_images = [
-            "https://court-sportswear.com/cdn/shop/files/unisex-organic-cotton-t-shirt-black-front-2-6783d1ce12e89.png",
-            "https://court-sportswear.com/cdn/shop/files/all-over-print-recycled-unisex-sports-jersey-white-front-2-6783c7c53d88f.png",
-        ]
+        # Step 3: Upload product image (dynamic from Shopify)
+        product_images = _get_product_images(access_token, advertiser_id)
         image_id = ""
-        for img_url in product_images:
+        for img_url in product_images[:3]:
             image_id = _upload_image(access_token, advertiser_id, img_url)
             results["steps"].append({"step": "upload_image", "url": img_url, "image_id": image_id})
             if image_id:
@@ -380,7 +371,7 @@ def launch_campaign(
             ad_ids = ad_result.get("data", {}).get("ad_ids", [])
             ad_id = ad_ids[0] if ad_ids else None
         else:
-            ad_warning = f"Ad creation failed: {ad_result.get('message')}. Campaign and ad group are live - ad can be created manually in TikTok Ads Manager."
+            ad_warning = f"Ad creation failed: {ad_result.get('message')}. Campaign and ad group are live."
 
         # Save to local DB
         campaign_record = CampaignModel(
@@ -413,6 +404,7 @@ def launch_campaign(
 @router.post("/create-ad-for-adgroup", summary="Create ad for existing ad group")
 def create_ad_for_adgroup(
     adgroup_id: str = Query(..., description="Existing ad group ID"),
+    image_url: str = Query(None, description="Optional image URL override"),
     db: Session = Depends(get_db),
 ):
     creds = _get_active_token(db)
@@ -423,17 +415,21 @@ def create_ad_for_adgroup(
     advertiser_id = creds["advertiser_id"]
     results = {"steps": []}
 
-    # Upload image
-    product_images = [
-        "https://court-sportswear.com/cdn/shop/files/unisex-organic-cotton-t-shirt-black-front-2-6783d1ce12e89.png",
-        "https://court-sportswear.com/cdn/shop/files/all-over-print-recycled-unisex-sports-jersey-white-front-2-6783c7c53d88f.png",
-    ]
+    # Upload image - use provided URL or fetch from Shopify
+    if image_url:
+        image_urls = [image_url]
+    else:
+        image_urls = _get_product_images(access_token, advertiser_id)
+
     image_id = ""
-    for img_url in product_images:
+    for img_url in image_urls[:3]:
         image_id = _upload_image(access_token, advertiser_id, img_url)
         results["steps"].append({"step": "upload_image", "url": img_url, "image_id": image_id})
         if image_id:
             break
+
+    if not image_id:
+        return {"success": False, "error": "All image uploads failed", "details": results}
 
     # Find identity
     identity = _find_best_identity(access_token, advertiser_id)
@@ -442,7 +438,7 @@ def create_ad_for_adgroup(
     identity_type = identity.get("identity_type", "")
 
     if not identity_id:
-        return {"success": False, "error": "No usable identity found. You need to link a TikTok account to your ad account in TikTok Ads Manager.", "details": results}
+        return {"success": False, "error": "No usable identity found. Link a TikTok account in TikTok Ads Manager.", "details": results}
 
     # Create ad
     ad_creative = {
@@ -453,9 +449,8 @@ def create_ad_for_adgroup(
         "ad_format": "SINGLE_IMAGE",
         "identity_id": identity_id,
         "identity_type": identity_type,
+        "image_ids": [image_id],
     }
-    if image_id:
-        ad_creative["image_ids"] = [image_id]
 
     ad_data = {
         "advertiser_id": advertiser_id,
@@ -476,7 +471,6 @@ def create_ad_for_adgroup(
 
 @router.get("/identities", summary="List all TikTok identities")
 def list_identities(db: Session = Depends(get_db)):
-    """List all identity types available for this advertiser."""
     creds = _get_active_token(db)
     if not creds["access_token"]:
         return {"error": "Not connected"}
@@ -495,41 +489,20 @@ def list_identities(db: Session = Depends(get_db)):
 
 @router.get("/debug-image-upload", summary="Test image upload")
 def debug_image_upload(
-    image_url: str = Query("https://court-sportswear.com/cdn/shop/files/unisex-organic-cotton-t-shirt-black-front-2-6783d1ce12e89.png"),
+    image_url: str = Query("https://cdn.shopify.com/s/files/1/0672/2030/8191/products/mens-tennis-hoodie-921535.jpg?v=1708170515"),
     db: Session = Depends(get_db),
 ):
-    """Debug endpoint to test image upload methods."""
     creds = _get_active_token(db)
     if not creds["access_token"]:
         return {"error": "Not connected"}
 
-    results = {}
-
-    # Test URL upload
     url_data = {
         "advertiser_id": creds["advertiser_id"],
         "upload_type": "UPLOAD_BY_URL",
         "image_url": image_url,
     }
-    results["url_upload"] = _tiktok_api("POST", "/file/image/ad/upload/", creds["access_token"], data=url_data)
-
-    # Test file upload
-    try:
-        img_resp = requests.get(image_url, timeout=30)
-        img_resp.raise_for_status()
-        image_data = img_resp.content
-        results["image_download"] = {"status": "ok", "size_bytes": len(image_data), "content_type": img_resp.headers.get("content-type")}
-
-        url = f"{TIKTOK_API_BASE}/file/image/ad/upload/"
-        headers = {"Access-Token": creds["access_token"]}
-        files = {"image_file": ("product.png", image_data, "image/png")}
-        form_data = {"advertiser_id": creds["advertiser_id"], "upload_type": "UPLOAD_BY_FILE"}
-        resp = requests.post(url, headers=headers, data=form_data, files=files, timeout=60)
-        results["file_upload"] = resp.json()
-    except Exception as e:
-        results["file_upload"] = {"error": str(e)}
-
-    return results
+    result = _tiktok_api("POST", "/file/image/ad/upload/", creds["access_token"], data=url_data)
+    return {"image_url": image_url, "result": result}
 
 
 @router.get("/performance", summary="Get TikTok Performance Data")
