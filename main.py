@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.database import engine, Base, get_db
-from app.routers import products, campaigns, dashboard, settings, automation, meta, tiktok
+from app.routers import products, campaigns, dashboard, settings, automation, meta, tiktok, deploy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("AutoSEM")
@@ -20,12 +20,12 @@ async def lifespan(app: FastAPI):
     logger.info("\U0001f680 AutoSEM starting up...")
     Base.metadata.create_all(bind=engine)
     logger.info("\u2705 Database tables created")
-    logger.info("\u2705 TikTok router loaded")
+    logger.info("\u2705 All routers loaded (meta, tiktok, deploy)")
     yield
     logger.info("\U0001f44b AutoSEM shutting down...")
 
 
-app = FastAPI(title="AutoSEM", version="0.3.0", docs_url="/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
+app = FastAPI(title="AutoSEM", version="0.3.1", docs_url="/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -37,11 +37,12 @@ app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"]
 app.include_router(automation.router, prefix="/api/v1/automation", tags=["automation"])
 app.include_router(meta.router, prefix="/api/v1/meta", tags=["meta"])
 app.include_router(tiktok.router, prefix="/api/v1/tiktok", tags=["tiktok"])
+app.include_router(deploy.router, prefix="/api/v1/deploy", tags=["deploy"])
 
 
 @app.get("/", summary="Root")
 async def root():
-    return {"message": "Welcome to AutoSEM v0.3.0", "dashboard": "/dashboard", "tiktok_setup": "/tiktok-setup"}
+    return {"message": "Welcome to AutoSEM v0.3.1", "dashboard": "/dashboard", "tiktok_setup": "/tiktok-setup"}
 
 
 @app.get("/dashboard", summary="Dashboard", response_class=HTMLResponse)
@@ -59,7 +60,7 @@ async def dashboard_page():
 
 @app.get("/health", summary="Health Check")
 async def health_check():
-    return {"status": "healthy", "version": "0.3.0", "tiktok_router": "loaded"}
+    return {"status": "healthy", "version": "0.3.1", "tiktok_router": "loaded", "deploy_router": "loaded"}
 
 
 @app.get("/tiktok-setup", summary="TikTok Setup Page", response_class=HTMLResponse)
@@ -343,7 +344,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             <h2>Recent Activity</h2>
             <div id="activity-log"><div class="loading-msg"><div class="spinner"></div> Loading activity...</div></div>
         </div>
-        <div class="footer">AutoSEM v0.3.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
+        <div class="footer">AutoSEM v0.3.1 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
     </div>
     <script>
         const API = '/api/v1';
