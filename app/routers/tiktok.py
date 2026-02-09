@@ -16,7 +16,6 @@ from app.database import get_db, TikTokTokenModel, CampaignModel, ActivityLogMod
 logger = logging.getLogger("AutoSEM.TikTok")
 router = APIRouter()
 
-# TikTok App credentials
 TIKTOK_APP_ID = os.environ.get("TIKTOK_APP_ID", "7602833892719542273")
 TIKTOK_APP_SECRET = os.environ.get("TIKTOK_APP_SECRET", "b2d479247984871ef1b6f26c1639bf36ad822c21")
 TIKTOK_REDIRECT_URI = os.environ.get("TIKTOK_REDIRECT_URI", "https://auto-sem.replit.app/api/v1/tiktok/callback")
@@ -24,18 +23,17 @@ TIKTOK_API_BASE = "https://business-api.tiktok.com/open_api/v1.3"
 
 
 def _get_active_token(db: Session) -> dict:
-    """Get the active TikTok access token and advertiser_id from DB."""
-    token_record = db.query(TikTokTokenModel).first()
-    if token_record and token_record.access_token:
-        return {
-            "access_token": token_record.access_token,
-            "advertiser_id": token_record.advertiser_id,
-        }
+    """Get TikTok token from DB first, then fall back to env vars (Replit Secrets)."""
+    try:
+        token_record = db.query(TikTokTokenModel).first()
+        if token_record and token_record.access_token:
+            return {"access_token": token_record.access_token, "advertiser_id": token_record.advertiser_id}
+    except Exception:
+        pass
     return {"access_token": os.environ.get("TIKTOK_ACCESS_TOKEN", ""), "advertiser_id": os.environ.get("TIKTOK_ADVERTISER_ID", "")}
 
 
 def _tiktok_api(method: str, endpoint: str, access_token: str, params: dict = None, data: dict = None) -> dict:
-    """Make a TikTok Business API call."""
     url = f"{TIKTOK_API_BASE}{endpoint}"
     headers = {"Access-Token": access_token, "Content-Type": "application/json"}
     try:
@@ -50,8 +48,7 @@ def _tiktok_api(method: str, endpoint: str, access_token: str, params: dict = No
         return {"code": -1, "message": str(e)}
 
 
-@router.get("/connect", summary="Connect TikTok",
-            description="Redirect to TikTok OAuth authorization")
+@router.get("/connect", summary="Connect TikTok")
 def connect_tiktok():
     if not TIKTOK_APP_ID:
         return {"error": "TIKTOK_APP_ID not configured"}
@@ -64,8 +61,7 @@ def connect_tiktok():
     return RedirectResponse(url=auth_url)
 
 
-@router.get("/callback", summary="OAuth Callback",
-            description="Handle TikTok OAuth callback")
+@router.get("/callback", summary="OAuth Callback")
 def oauth_callback(
     auth_code: str = Query(None),
     code: str = Query(None),
@@ -77,36 +73,49 @@ def oauth_callback(
     if error:
         return HTMLResponse(content=f"<h1>Error</h1><p>{error}</p>")
     if not the_code:
-        return HTMLResponse(content="<h1>Error</h1><p>No auth code received. Check URL for auth_code parameter.</p>")
+        return HTMLResponse(content="<h1>Error</h1><p>No auth code received.</p>")
     result = _exchange_token(the_code, db)
     if result.get("success"):
-        adv_id = result.get('advertiser_id', 'unknown')
-        html = f"""<h1>TikTok Connected!</h1>
-        <p>Access token saved. Advertiser ID: {adv_id}</p>
-        <p>Redirecting to dashboard...</p>
-        <script>setTimeout(() => window.location='/dashboard', 3000)</script>"""
+        adv_id = result.get("advertiser_id", "unknown")
+        token = result.get("_token", "")
+        html = '<!DOCTYPE html><html><head><title>TikTok Connected</title>'
+        html += '<style>'
+        html += 'body{font-family:Segoe UI,sans-serif;max-width:700px;margin:40px auto;padding:20px;background:#f5f5f5}'
+        html += '.card{background:white;border-radius:12px;padding:30px;box-shadow:0 2px 8px rgba(0,0,0,.1);margin-bottom:20px}'
+        html += 'h1{color:#28a745}'
+        html += '.secret-box{background:#1e1e1e;color:#4ec9b0;padding:14px 18px;border-radius:8px;font-family:monospace;font-size:.85em;word-break:break-all;margin:8px 0;position:relative}'
+        html += '.copy-btn{position:absolute;top:8px;right:8px;background:#4338ca;color:white;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:.8em}'
+        html += '.step{padding:12px 16px;background:#f0fdf4;border-left:4px solid #28a745;border-radius:4px;margin:10px 0}'
+        html += '.warn{padding:12px 16px;background:#fef3c7;border-left:4px solid #f59e0b;border-radius:4px;margin:10px 0}'
+        html += '</style></head><body>'
+        html += '<div class="card"><h1>TikTok Connected!</h1>'
+        html += f'<p>Advertiser ID: <strong>{adv_id}</strong></p>'
+        html += '<p>Token saved to database. To <strong>persist across deploys</strong>, add these as Replit Secrets:</p></div>'
+        html += '<div class="card"><h2>Add These Replit Secrets</h2>'
+        html += '<div class="step"><strong>Step 1:</strong> In Replit, go to Secrets (lock icon in sidebar)</div>'
+        html += '<p><strong>TIKTOK_ACCESS_TOKEN</strong></p>'
+        html += f'<div class="secret-box" id="tb">{token}<button class="copy-btn" onclick="copyT(\'tb\')">Copy</button></div>'
+        html += '<p><strong>TIKTOK_ADVERTISER_ID</strong></p>'
+        html += f'<div class="secret-box" id="ab">{adv_id}<button class="copy-btn" onclick="copyT(\'ab\')">Copy</button></div>'
+        html += '<div class="step"><strong>Step 2:</strong> Republish after adding secrets. Token survives all future deploys.</div>'
+        html += '<div class="warn">This is the LAST TIME you need to authorize. Once secrets are saved, you are set permanently.</div></div>'
+        html += '<div class="card"><a href="/dashboard" style="font-size:1.1em">Go to Dashboard</a></div>'
+        html += '<script>function copyT(id){var e=document.getElementById(id);var t=e.textContent.replace("Copy","").trim();navigator.clipboard.writeText(t);e.querySelector(".copy-btn").textContent="Copied!";setTimeout(function(){e.querySelector(".copy-btn").textContent="Copy"},2000)}</script>'
+        html += '</body></html>'
         return HTMLResponse(content=html)
     else:
         return HTMLResponse(content=f"<h1>Error</h1><p>{result.get('error', 'Unknown error')}</p>")
 
 
 @router.post("/exchange-token", summary="Exchange auth code for access token")
-def exchange_token_endpoint(
-    auth_code: str = Query(...),
-    db: Session = Depends(get_db),
-):
+def exchange_token_endpoint(auth_code: str = Query(...), db: Session = Depends(get_db)):
     return _exchange_token(auth_code, db)
 
 
 def _exchange_token(auth_code: str, db: Session) -> dict:
-    """Exchange an auth_code for an access token."""
     try:
         url = f"{TIKTOK_API_BASE}/oauth2/access_token/"
-        payload = {
-            "app_id": TIKTOK_APP_ID,
-            "secret": TIKTOK_APP_SECRET,
-            "auth_code": auth_code,
-        }
+        payload = {"app_id": TIKTOK_APP_ID, "secret": TIKTOK_APP_SECRET, "auth_code": auth_code}
         resp = requests.post(url, json=payload, timeout=30)
         resp.raise_for_status()
         result = resp.json()
@@ -147,7 +156,7 @@ def _exchange_token(auth_code: str, db: Session) -> dict:
         db.commit()
 
         logger.info(f"TikTok token saved. Advertiser ID: {advertiser_id}")
-        return {"success": True, "advertiser_id": advertiser_id, "advertiser_ids": advertiser_ids}
+        return {"success": True, "advertiser_id": advertiser_id, "advertiser_ids": advertiser_ids, "_token": access_token}
 
     except Exception as e:
         logger.error(f"Token exchange failed: {e}")
@@ -164,19 +173,13 @@ def check_tiktok_status(db: Session = Depends(get_db)):
                             params={"app_id": TIKTOK_APP_ID, "secret": TIKTOK_APP_SECRET})
         if result.get("code") == 0:
             advertisers = result.get("data", {}).get("list", [])
-            return {
-                "connected": True,
-                "advertiser_id": creds["advertiser_id"],
-                "advertisers": advertisers,
-                "message": "Connected"
-            }
+            return {"connected": True, "advertiser_id": creds["advertiser_id"], "advertisers": advertisers, "message": "Connected"}
         return {"connected": False, "message": result.get("message", "API error")}
     except Exception as e:
         return {"connected": False, "message": str(e)}
 
 
-@router.post("/launch-campaign", summary="Launch TikTok Ad Campaign",
-             description="Create a complete TikTok ad campaign with ad group and ads.")
+@router.post("/launch-campaign", summary="Launch TikTok Ad Campaign")
 def launch_campaign(
     daily_budget: float = Query(20.0, description="Daily budget in USD (TikTok min: $20 ad group)"),
     campaign_name: str = Query("Court Sportswear - Tennis Apparel", description="Campaign name"),
@@ -189,15 +192,11 @@ def launch_campaign(
     access_token = creds["access_token"]
     advertiser_id = creds["advertiser_id"]
     results = {"steps": []}
-
-    # TikTok enforces minimum budgets
-    adgroup_budget = max(daily_budget, 20.0)  # Ad group min: $20/day
-
-    # Schedule start time - 5 minutes from now in advertiser timezone format
+    adgroup_budget = max(daily_budget, 20.0)
     schedule_start = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-        # Step 1: Create Campaign with unlimited budget (control at ad group level)
+        # Step 1: Create Campaign
         campaign_data = {
             "advertiser_id": advertiser_id,
             "campaign_name": campaign_name,
@@ -209,7 +208,6 @@ def launch_campaign(
         results["steps"].append({"step": "create_campaign", "result": camp_result})
 
         if camp_result.get("code") != 0:
-            # Fallback: try with explicit $50 budget
             campaign_data["budget_mode"] = "BUDGET_MODE_DAY"
             campaign_data["budget"] = 50.0
             camp_result = _tiktok_api("POST", "/campaign/create/", access_token, data=campaign_data)
@@ -242,7 +240,6 @@ def launch_campaign(
         results["steps"].append({"step": "create_adgroup", "result": ag_result})
 
         if ag_result.get("code") != 0:
-            # Retry with minimal params
             adgroup_data_simple = {
                 "advertiser_id": advertiser_id,
                 "campaign_id": campaign_id,
@@ -271,13 +268,9 @@ def launch_campaign(
             "https://court-sportswear.com/cdn/shop/files/unisex-organic-cotton-t-shirt-black-front-2-6783d1ce12e89.png",
             "https://court-sportswear.com/cdn/shop/files/all-over-print-recycled-unisex-sports-jersey-white-front-2-6783c7c53d88f.png",
         ]
-
         image_id = None
         for img_url in product_images:
-            upload_data = {
-                "advertiser_id": advertiser_id,
-                "image_url": img_url,
-            }
+            upload_data = {"advertiser_id": advertiser_id, "image_url": img_url}
             img_result = _tiktok_api("POST", "/file/image/ad/upload/", access_token, data=upload_data)
             results["steps"].append({"step": "upload_image", "url": img_url, "result": img_result})
             if img_result.get("code") == 0:
@@ -290,7 +283,7 @@ def launch_campaign(
             "adgroup_id": adgroup_id,
             "creatives": [{
                 "ad_name": "Court Sportswear - Tennis & Pickleball Gear",
-                "ad_text": "Premium tennis & pickleball apparel. Performance caps, polos & more. Shop now! \ud83c\udfbe",
+                "ad_text": "Premium tennis & pickleball apparel. Performance caps, polos & more. Shop now!",
                 "landing_page_url": "https://court-sportswear.com/collections/all",
                 "call_to_action": "SHOP_NOW",
                 "ad_format": "SINGLE_IMAGE",
@@ -307,35 +300,23 @@ def launch_campaign(
         if ad_result.get("code") == 0:
             ad_ids = ad_result.get("data", {}).get("ad_ids", [])
             ad_id = ad_ids[0] if ad_ids else None
-            logger.info(f"Ad created: {ad_id}")
 
-        # Step 4: Save to local database
+        # Save to local DB
         campaign_record = CampaignModel(
-            platform="tiktok",
-            platform_campaign_id=str(campaign_id),
-            name=campaign_name,
-            status="ACTIVE",
-            campaign_type="TRAFFIC",
-            daily_budget=adgroup_budget,
+            platform="tiktok", platform_campaign_id=str(campaign_id),
+            name=campaign_name, status="ACTIVE", campaign_type="TRAFFIC", daily_budget=adgroup_budget,
         )
         db.add(campaign_record)
-
         log = ActivityLogModel(
-            action="TIKTOK_CAMPAIGN_LAUNCHED",
-            entity_type="campaign",
-            entity_id=str(campaign_id),
-            details=f"Launched TikTok campaign '{campaign_name}' with ${adgroup_budget}/day budget. Campaign: {campaign_id}, Ad Group: {adgroup_id}, Ad: {ad_id}",
+            action="TIKTOK_CAMPAIGN_LAUNCHED", entity_type="campaign", entity_id=str(campaign_id),
+            details=f"Launched TikTok campaign '{campaign_name}' ${adgroup_budget}/day. Campaign: {campaign_id}, AdGroup: {adgroup_id}, Ad: {ad_id}",
         )
         db.add(log)
         db.commit()
 
         return {
-            "success": True,
-            "campaign_id": campaign_id,
-            "adgroup_id": adgroup_id,
-            "ad_id": ad_id,
+            "success": True, "campaign_id": campaign_id, "adgroup_id": adgroup_id, "ad_id": ad_id,
             "daily_budget": adgroup_budget,
-            "note": f"TikTok minimum daily budget is $20/ad group. Budget set to ${adgroup_budget}/day.",
             "message": f"TikTok campaign launched! Campaign ID: {campaign_id}, Budget: ${adgroup_budget}/day",
             "details": results,
         }
@@ -350,7 +331,6 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"error": "TikTok not connected"}
-
     try:
         result = _tiktok_api("GET", "/campaign/get/", creds["access_token"],
                            params={"advertiser_id": creds["advertiser_id"], "page_size": 100})
@@ -362,27 +342,22 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
         if result.get("code") == 0:
             for camp in result.get("data", {}).get("list", []):
                 campaigns.append({
-                    "id": camp.get("campaign_id"),
-                    "name": camp.get("campaign_name"),
-                    "status": camp.get("operation_status"),
-                    "budget": camp.get("budget", 0),
+                    "id": camp.get("campaign_id"), "name": camp.get("campaign_name"),
+                    "status": camp.get("operation_status"), "budget": camp.get("budget", 0),
                     "objective": camp.get("objective_type"),
                 })
 
         end_date = datetime.utcnow().strftime("%Y-%m-%d")
         start_date = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
-
         stats_result = _tiktok_api("GET", "/report/integrated/get/", creds["access_token"],
                                   params={
                                       "advertiser_id": creds["advertiser_id"],
                                       "report_type": "BASIC",
                                       "dimensions": json.dumps(["campaign_id"]),
                                       "data_level": "AUCTION_CAMPAIGN",
-                                      "start_date": start_date,
-                                      "end_date": end_date,
+                                      "start_date": start_date, "end_date": end_date,
                                       "metrics": json.dumps(["spend", "impressions", "clicks", "ctr", "cpc", "reach"]),
                                   })
-
         if stats_result.get("code") == 0:
             for row in stats_result.get("data", {}).get("list", []):
                 metrics = row.get("metrics", {})
@@ -392,15 +367,11 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
 
         avg_ctr = (total_clicks / total_impressions * 100) if total_impressions > 0 else 0
         avg_cpc = (total_spend / total_clicks) if total_clicks > 0 else 0
-
         return {
             "summary": {
-                "total_campaigns": len(campaigns),
-                "total_spend": round(total_spend, 2),
-                "total_impressions": total_impressions,
-                "total_clicks": total_clicks,
-                "avg_ctr": round(avg_ctr, 2),
-                "avg_cpc": round(avg_cpc, 2),
+                "total_campaigns": len(campaigns), "total_spend": round(total_spend, 2),
+                "total_impressions": total_impressions, "total_clicks": total_clicks,
+                "avg_ctr": round(avg_ctr, 2), "avg_cpc": round(avg_cpc, 2),
             },
             "campaigns": campaigns,
         }
