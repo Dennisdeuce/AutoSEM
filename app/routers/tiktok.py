@@ -48,6 +48,52 @@ def _tiktok_api(method: str, endpoint: str, access_token: str, params: dict = No
         return {"code": -1, "message": str(e)}
 
 
+def _get_or_create_identity(access_token: str, advertiser_id: str, image_id: str = None) -> dict:
+    """Get existing custom identity or create one for ad delivery."""
+    # First check for existing identities
+    result = _tiktok_api("GET", "/identity/get/", access_token,
+                         params={"advertiser_id": advertiser_id, "identity_type": "CUSTOMIZED_USER"})
+    if result.get("code") == 0:
+        identities = result.get("data", {}).get("identity_list", [])
+        if identities:
+            identity = identities[0]
+            logger.info(f"Using existing identity: {identity.get('identity_id')}")
+            return {"identity_id": identity.get("identity_id"), "identity_type": "CUSTOMIZED_USER"}
+
+    # Create a new custom identity
+    create_data = {
+        "advertiser_id": advertiser_id,
+        "display_name": "Court Sportswear",
+    }
+    if image_id:
+        create_data["image_id"] = image_id
+
+    result = _tiktok_api("POST", "/identity/create/", access_token, data=create_data)
+    if result.get("code") == 0:
+        identity_id = result.get("data", {}).get("identity_id")
+        logger.info(f"Created custom identity: {identity_id}")
+        return {"identity_id": identity_id, "identity_type": "CUSTOMIZED_USER"}
+
+    logger.warning(f"Identity creation failed: {result.get('message')}")
+    return {}
+
+
+def _upload_image_by_url(access_token: str, advertiser_id: str, image_url: str) -> str:
+    """Upload an image to TikTok by URL. Returns image_id or empty string."""
+    upload_data = {
+        "advertiser_id": advertiser_id,
+        "upload_type": "UPLOAD_BY_URL",
+        "image_url": image_url,
+    }
+    result = _tiktok_api("POST", "/file/image/ad/upload/", access_token, data=upload_data)
+    if result.get("code") == 0:
+        image_id = result.get("data", {}).get("image_id", "")
+        logger.info(f"Image uploaded via URL: {image_id}")
+        return image_id
+    logger.warning(f"Image upload failed for {image_url}: {result.get('message')}")
+    return ""
+
+
 @router.get("/connect", summary="Connect TikTok")
 def connect_tiktok():
     if not TIKTOK_APP_ID:
@@ -224,6 +270,7 @@ def launch_campaign(
             "campaign_id": campaign_id,
             "adgroup_name": f"{campaign_name} - Tennis Enthusiasts 25-55",
             "placement_type": "PLACEMENT_TYPE_AUTOMATIC",
+            "promotion_type": "WEBSITE",
             "budget_mode": "BUDGET_MODE_DAY",
             "budget": adgroup_budget,
             "schedule_type": "SCHEDULE_FROM_NOW",
@@ -241,12 +288,12 @@ def launch_campaign(
         results["steps"].append({"step": "create_adgroup", "result": ag_result})
 
         if ag_result.get("code") != 0:
-            # Retry with OCPM billing and minimal targeting
             adgroup_data_simple = {
                 "advertiser_id": advertiser_id,
                 "campaign_id": campaign_id,
                 "adgroup_name": f"{campaign_name} - Auto Targeting",
                 "placement_type": "PLACEMENT_TYPE_AUTOMATIC",
+                "promotion_type": "WEBSITE",
                 "budget_mode": "BUDGET_MODE_DAY",
                 "budget": adgroup_budget,
                 "schedule_type": "SCHEDULE_FROM_NOW",
@@ -266,35 +313,43 @@ def launch_campaign(
         adgroup_id = ag_result.get("data", {}).get("adgroup_id")
         logger.info(f"Ad group created: {adgroup_id}")
 
-        # Step 3: Upload image and create ad
+        # Step 3: Upload product image via URL
         product_images = [
             "https://court-sportswear.com/cdn/shop/files/unisex-organic-cotton-t-shirt-black-front-2-6783d1ce12e89.png",
             "https://court-sportswear.com/cdn/shop/files/all-over-print-recycled-unisex-sports-jersey-white-front-2-6783c7c53d88f.png",
         ]
-        image_id = None
+        image_id = ""
         for img_url in product_images:
-            upload_data = {"advertiser_id": advertiser_id, "image_url": img_url}
-            img_result = _tiktok_api("POST", "/file/image/ad/upload/", access_token, data=upload_data)
-            results["steps"].append({"step": "upload_image", "url": img_url, "result": img_result})
-            if img_result.get("code") == 0:
-                image_id = img_result.get("data", {}).get("image_id")
-                logger.info(f"Image uploaded: {image_id}")
+            image_id = _upload_image_by_url(access_token, advertiser_id, img_url)
+            results["steps"].append({"step": "upload_image", "url": img_url, "image_id": image_id})
+            if image_id:
                 break
+
+        # Step 4: Get or create identity for ad delivery
+        identity = _get_or_create_identity(access_token, advertiser_id, image_id if image_id else None)
+        results["steps"].append({"step": "get_or_create_identity", "result": identity})
+        identity_id = identity.get("identity_id", "")
+        identity_type = identity.get("identity_type", "CUSTOMIZED_USER")
+
+        # Step 5: Create Ad
+        ad_creative = {
+            "ad_name": "Court Sportswear - Tennis & Pickleball Gear",
+            "ad_text": "Premium tennis & pickleball apparel. Performance caps, polos & more. Shop now!",
+            "landing_page_url": "https://court-sportswear.com/collections/all",
+            "call_to_action": "SHOP_NOW",
+            "ad_format": "SINGLE_IMAGE",
+            "identity_id": identity_id,
+            "identity_type": identity_type,
+        }
+        if image_id:
+            ad_creative["image_ids"] = [image_id]
 
         ad_data = {
             "advertiser_id": advertiser_id,
             "adgroup_id": adgroup_id,
-            "creatives": [{
-                "ad_name": "Court Sportswear - Tennis & Pickleball Gear",
-                "ad_text": "Premium tennis & pickleball apparel. Performance caps, polos & more. Shop now!",
-                "landing_page_url": "https://court-sportswear.com/collections/all",
-                "call_to_action": "SHOP_NOW",
-                "ad_format": "SINGLE_IMAGE",
-            }],
+            "creatives": [ad_creative],
             "operation_status": "ENABLE",
         }
-        if image_id:
-            ad_data["creatives"][0]["image_ids"] = [image_id]
 
         ad_result = _tiktok_api("POST", "/ad/create/", access_token, data=ad_data)
         results["steps"].append({"step": "create_ad", "result": ad_result})
@@ -320,6 +375,7 @@ def launch_campaign(
         return {
             "success": True, "campaign_id": campaign_id, "adgroup_id": adgroup_id, "ad_id": ad_id,
             "daily_budget": adgroup_budget,
+            "identity_id": identity_id,
             "message": f"TikTok campaign launched! Campaign ID: {campaign_id}, Budget: ${adgroup_budget}/day",
             "details": results,
         }
@@ -327,6 +383,83 @@ def launch_campaign(
     except Exception as e:
         logger.error(f"Campaign launch failed: {e}")
         return {"success": False, "error": str(e), "details": results}
+
+
+@router.post("/create-ad-for-adgroup", summary="Create ad for existing ad group",
+             description="Add an ad creative to an existing ad group. Useful for retrying ad creation.")
+def create_ad_for_adgroup(
+    adgroup_id: str = Query(..., description="Existing ad group ID"),
+    db: Session = Depends(get_db),
+):
+    """Create an ad for an existing ad group - handles image upload and identity."""
+    creds = _get_active_token(db)
+    if not creds["access_token"] or not creds["advertiser_id"]:
+        return {"success": False, "error": "TikTok not connected"}
+
+    access_token = creds["access_token"]
+    advertiser_id = creds["advertiser_id"]
+    results = {"steps": []}
+
+    # Upload image
+    product_images = [
+        "https://court-sportswear.com/cdn/shop/files/unisex-organic-cotton-t-shirt-black-front-2-6783d1ce12e89.png",
+        "https://court-sportswear.com/cdn/shop/files/all-over-print-recycled-unisex-sports-jersey-white-front-2-6783c7c53d88f.png",
+    ]
+    image_id = ""
+    for img_url in product_images:
+        image_id = _upload_image_by_url(access_token, advertiser_id, img_url)
+        results["steps"].append({"step": "upload_image", "url": img_url, "image_id": image_id})
+        if image_id:
+            break
+
+    # Get or create identity
+    identity = _get_or_create_identity(access_token, advertiser_id, image_id if image_id else None)
+    results["steps"].append({"step": "identity", "result": identity})
+    identity_id = identity.get("identity_id", "")
+    identity_type = identity.get("identity_type", "CUSTOMIZED_USER")
+
+    if not identity_id:
+        return {"success": False, "error": "Could not get or create identity", "details": results}
+
+    # Create ad
+    ad_creative = {
+        "ad_name": "Court Sportswear - Tennis & Pickleball Gear",
+        "ad_text": "Premium tennis & pickleball apparel. Performance caps, polos & more. Shop now!",
+        "landing_page_url": "https://court-sportswear.com/collections/all",
+        "call_to_action": "SHOP_NOW",
+        "ad_format": "SINGLE_IMAGE",
+        "identity_id": identity_id,
+        "identity_type": identity_type,
+    }
+    if image_id:
+        ad_creative["image_ids"] = [image_id]
+
+    ad_data = {
+        "advertiser_id": advertiser_id,
+        "adgroup_id": adgroup_id,
+        "creatives": [ad_creative],
+        "operation_status": "ENABLE",
+    }
+    ad_result = _tiktok_api("POST", "/ad/create/", access_token, data=ad_data)
+    results["steps"].append({"step": "create_ad", "result": ad_result})
+
+    ad_id = None
+    if ad_result.get("code") == 0:
+        ad_ids = ad_result.get("data", {}).get("ad_ids", [])
+        ad_id = ad_ids[0] if ad_ids else None
+        return {"success": True, "ad_id": ad_id, "identity_id": identity_id, "image_id": image_id, "details": results}
+
+    return {"success": False, "error": ad_result.get("message", "Ad creation failed"), "details": results}
+
+
+@router.get("/identities", summary="List TikTok identities")
+def list_identities(db: Session = Depends(get_db)):
+    creds = _get_active_token(db)
+    if not creds["access_token"]:
+        return {"error": "Not connected"}
+    result = _tiktok_api("GET", "/identity/get/", creds["access_token"],
+                         params={"advertiser_id": creds["advertiser_id"], "identity_type": "CUSTOMIZED_USER"})
+    return result
 
 
 @router.get("/performance", summary="Get TikTok Performance Data")
