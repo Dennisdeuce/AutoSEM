@@ -218,7 +218,7 @@ def launch_campaign(
         campaign_id = camp_result.get("data", {}).get("campaign_id")
         logger.info(f"Campaign created: {campaign_id}")
 
-        # Step 2: Create Ad Group with schedule_start_time
+        # Step 2: Create Ad Group
         adgroup_data = {
             "advertiser_id": advertiser_id,
             "campaign_id": campaign_id,
@@ -228,6 +228,7 @@ def launch_campaign(
             "budget": adgroup_budget,
             "schedule_type": "SCHEDULE_FROM_NOW",
             "schedule_start_time": schedule_start,
+            "billing_event": "CPC",
             "optimization_goal": "CLICK",
             "bid_type": "BID_TYPE_NO_BID",
             "pacing": "PACING_MODE_SMOOTH",
@@ -240,6 +241,7 @@ def launch_campaign(
         results["steps"].append({"step": "create_adgroup", "result": ag_result})
 
         if ag_result.get("code") != 0:
+            # Retry with OCPM billing and minimal targeting
             adgroup_data_simple = {
                 "advertiser_id": advertiser_id,
                 "campaign_id": campaign_id,
@@ -249,6 +251,7 @@ def launch_campaign(
                 "budget": adgroup_budget,
                 "schedule_type": "SCHEDULE_FROM_NOW",
                 "schedule_start_time": schedule_start,
+                "billing_event": "OCPM",
                 "optimization_goal": "CLICK",
                 "bid_type": "BID_TYPE_NO_BID",
                 "pacing": "PACING_MODE_SMOOTH",
