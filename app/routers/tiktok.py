@@ -73,7 +73,6 @@ def oauth_callback(
     error: str = Query(None),
     db: Session = Depends(get_db),
 ):
-    # TikTok uses 'auth_code' parameter
     the_code = auth_code or code
     if error:
         return HTMLResponse(content=f"<h1>Error</h1><p>{error}</p>")
@@ -124,7 +123,6 @@ def _exchange_token(auth_code: str, db: Session) -> dict:
         if not access_token:
             return {"success": False, "error": "No access token in response", "raw": result}
 
-        # Save to database
         existing = db.query(TikTokTokenModel).first()
         if existing:
             existing.access_token = access_token
@@ -140,7 +138,6 @@ def _exchange_token(auth_code: str, db: Session) -> dict:
             db.add(token_record)
         db.commit()
 
-        # Log activity
         log = ActivityLogModel(
             action="TIKTOK_CONNECTED",
             entity_type="tiktok",
@@ -179,9 +176,10 @@ def check_tiktok_status(db: Session = Depends(get_db)):
 
 
 @router.post("/launch-campaign", summary="Launch TikTok Ad Campaign",
-             description="Create a complete TikTok ad campaign with ad group and ads")
+             description="Create a complete TikTok ad campaign with ad group and ads. "
+                         "TikTok minimum: $50/day campaign budget, $20/day ad group budget.")
 def launch_campaign(
-    daily_budget: float = Query(5.0, description="Daily budget in USD"),
+    daily_budget: float = Query(20.0, description="Daily budget in USD (TikTok min: $20 ad group, $50 campaign)"),
     campaign_name: str = Query("Court Sportswear - Tennis Apparel", description="Campaign name"),
     db: Session = Depends(get_db),
 ):
@@ -193,58 +191,63 @@ def launch_campaign(
     advertiser_id = creds["advertiser_id"]
     results = {"steps": []}
 
+    # TikTok enforces minimum budgets
+    campaign_budget = max(daily_budget, 50.0)  # Campaign min: $50/day
+    adgroup_budget = max(daily_budget, 20.0)    # Ad group min: $20/day
+
     try:
-        # ── Step 1: Create Campaign ──
+        # ── Step 1: Create Campaign (no budget limit, control at ad group level) ──
         campaign_data = {
             "advertiser_id": advertiser_id,
             "campaign_name": campaign_name,
             "objective_type": "TRAFFIC",
-            "budget_mode": "BUDGET_MODE_DAY",
-            "budget": daily_budget,
+            "budget_mode": "BUDGET_MODE_INFINITE",
             "operation_status": "ENABLE",
         }
         camp_result = _tiktok_api("POST", "/campaign/create/", access_token, data=campaign_data)
         results["steps"].append({"step": "create_campaign", "result": camp_result})
 
         if camp_result.get("code") != 0:
-            return {"success": False, "error": f"Campaign creation failed: {camp_result.get('message')}", "details": results}
+            # Fallback: try with explicit $50 budget
+            campaign_data["budget_mode"] = "BUDGET_MODE_DAY"
+            campaign_data["budget"] = campaign_budget
+            camp_result = _tiktok_api("POST", "/campaign/create/", access_token, data=campaign_data)
+            results["steps"].append({"step": "create_campaign_retry", "result": camp_result})
+            if camp_result.get("code") != 0:
+                return {"success": False, "error": f"Campaign creation failed: {camp_result.get('message')}", "details": results}
 
         campaign_id = camp_result.get("data", {}).get("campaign_id")
         logger.info(f"Campaign created: {campaign_id}")
 
-        # ── Step 2: Create Ad Group ──
+        # ── Step 2: Create Ad Group with budget control ──
         adgroup_data = {
             "advertiser_id": advertiser_id,
             "campaign_id": campaign_id,
-            "adgroup_name": f"{campaign_name} - Tennis Enthusiasts",
+            "adgroup_name": f"{campaign_name} - Tennis Enthusiasts 25-55",
             "placement_type": "PLACEMENT_TYPE_AUTOMATIC",
             "budget_mode": "BUDGET_MODE_DAY",
-            "budget": daily_budget,
+            "budget": adgroup_budget,
             "schedule_type": "SCHEDULE_FROM_NOW",
             "optimization_goal": "CLICK",
             "bid_type": "BID_TYPE_NO_BID",
-            "billing_event": "CPC",
             "pacing": "PACING_MODE_SMOOTH",
             "operation_status": "ENABLE",
-            # Targeting: US, ages 25-55, interested in sports/tennis
             "location_ids": ["6252001"],  # United States
             "gender": "GENDER_UNLIMITED",
             "age_groups": ["AGE_25_34", "AGE_35_44", "AGE_45_54"],
-            "interest_category_ids": [],
-            "interest_keyword_ids": [],
         }
         ag_result = _tiktok_api("POST", "/adgroup/create/", access_token, data=adgroup_data)
         results["steps"].append({"step": "create_adgroup", "result": ag_result})
 
         if ag_result.get("code") != 0:
-            # Try simplified version without targeting
+            # Retry with minimal targeting
             adgroup_data_simple = {
                 "advertiser_id": advertiser_id,
                 "campaign_id": campaign_id,
                 "adgroup_name": f"{campaign_name} - Auto Targeting",
                 "placement_type": "PLACEMENT_TYPE_AUTOMATIC",
                 "budget_mode": "BUDGET_MODE_DAY",
-                "budget": daily_budget,
+                "budget": adgroup_budget,
                 "schedule_type": "SCHEDULE_FROM_NOW",
                 "optimization_goal": "CLICK",
                 "bid_type": "BID_TYPE_NO_BID",
@@ -261,16 +264,11 @@ def launch_campaign(
         logger.info(f"Ad group created: {adgroup_id}")
 
         # ── Step 3: Upload image and create ad ──
-        # Use product images from Court Sportswear
         product_images = [
             "https://court-sportswear.com/cdn/shop/files/unisex-organic-cotton-t-shirt-black-front-2-6783d1ce12e89.png",
             "https://court-sportswear.com/cdn/shop/files/all-over-print-recycled-unisex-sports-jersey-white-front-2-6783c7c53d88f.png",
         ]
-        product_urls = [
-            "https://court-sportswear.com/collections/all",
-        ]
 
-        # Try to upload image for ad creative
         image_id = None
         for img_url in product_images:
             upload_data = {
@@ -290,7 +288,7 @@ def launch_campaign(
             "adgroup_id": adgroup_id,
             "creatives": [{
                 "ad_name": "Court Sportswear - Tennis & Pickleball Gear",
-                "ad_text": "Premium tennis & pickleball apparel. Performance caps, polos & more. Shop now!",
+                "ad_text": "Premium tennis & pickleball apparel. Performance caps, polos & more. Shop now! \ud83c\udfbe",
                 "landing_page_url": "https://court-sportswear.com/collections/all",
                 "call_to_action": "SHOP_NOW",
                 "ad_format": "SINGLE_IMAGE",
@@ -316,7 +314,7 @@ def launch_campaign(
             name=campaign_name,
             status="ACTIVE",
             campaign_type="TRAFFIC",
-            daily_budget=daily_budget,
+            daily_budget=adgroup_budget,
         )
         db.add(campaign_record)
 
@@ -324,7 +322,7 @@ def launch_campaign(
             action="TIKTOK_CAMPAIGN_LAUNCHED",
             entity_type="campaign",
             entity_id=str(campaign_id),
-            details=f"Launched TikTok campaign '{campaign_name}' with ${daily_budget}/day budget. Ad Group: {adgroup_id}, Ad: {ad_id}",
+            details=f"Launched TikTok campaign '{campaign_name}' with ${adgroup_budget}/day budget. Campaign: {campaign_id}, Ad Group: {adgroup_id}, Ad: {ad_id}",
         )
         db.add(log)
         db.commit()
@@ -334,8 +332,9 @@ def launch_campaign(
             "campaign_id": campaign_id,
             "adgroup_id": adgroup_id,
             "ad_id": ad_id,
-            "daily_budget": daily_budget,
-            "message": f"TikTok campaign launched! Campaign ID: {campaign_id}, Budget: ${daily_budget}/day",
+            "daily_budget": adgroup_budget,
+            "note": f"TikTok minimum daily budget is $20/ad group. Budget set to ${adgroup_budget}/day.",
+            "message": f"TikTok campaign launched! Campaign ID: {campaign_id}, Budget: ${adgroup_budget}/day",
             "details": results,
         }
 
@@ -351,7 +350,6 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
         return {"error": "TikTok not connected"}
 
     try:
-        # Get campaigns
         result = _tiktok_api("GET", "/campaign/get/", creds["access_token"],
                            params={"advertiser_id": creds["advertiser_id"], "page_size": 100})
         campaigns = []
@@ -369,7 +367,6 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
                     "objective": camp.get("objective_type"),
                 })
 
-        # Get campaign stats
         from datetime import timedelta
         end_date = datetime.utcnow().strftime("%Y-%m-%d")
         start_date = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
