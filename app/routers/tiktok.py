@@ -1,17 +1,18 @@
 """TikTok Ads router - OAuth, campaign creation, and performance tracking
 
-Ad creation strategy priority (v0.6.0 - TT_USER for all ads):
-1. SINGLE_IMAGE + TT_USER (primary - regular in-feed ads)
-2. SINGLE_IMAGE + TT_USER without CTA (CTA compatibility fallback)
-3. SINGLE_VIDEO + TT_USER (when video is available)
-4. Pangle display ad with TT_USER (audience network, WITH location_ids)
+Ad creation strategy priority (v0.7.0 - Video-first Spark Ads):
+1. SINGLE_VIDEO + TT_USER (primary - Spark Ads with video pushed to linked account)
+2. SINGLE_VIDEO + TT_USER without CTA (CTA compatibility fallback)
+3. Pangle display ad (audience network fallback)
 
 Identity types (as of early 2026):
-- TT_USER: Primary identity for ALL ad types. Links to actual TikTok account.
-  Works for both regular in-feed ads AND Spark Ads.
+- TT_USER: Primary identity for Spark Ads. Links to actual TikTok account.
+  Requires VIDEO content (images alone won't work with TT_USER for in-feed).
   CUSTOMIZED_USER is deprecated and returns "Custom identities are no longer supported."
 - BC_AUTH_TT: Business Center authorized accounts.
 - CUSTOMIZED_USER: DEPRECATED by TikTok as of early 2026.
+
+Video upload fix: TikTok requires video_signature (MD5 hash) for UPLOAD_BY_FILE.
 """
 
 import os
@@ -19,6 +20,7 @@ import io
 import json
 import logging
 import time
+import hashlib
 import tempfile
 import subprocess
 from datetime import datetime, timedelta
@@ -98,18 +100,32 @@ def _tiktok_api(method: str, endpoint: str, access_token: str, params: dict = No
 def _tiktok_upload(endpoint: str, access_token: str, advertiser_id: str,
                    file_path: str, file_field: str = "video_file",
                    extra_data: dict = None) -> dict:
-    """Upload a file to TikTok using multipart form data."""
+    """Upload a file to TikTok using multipart form data.
+
+    v0.7.0 fix: Computes MD5 hash and sends video_signature field,
+    which TikTok requires for UPLOAD_BY_FILE uploads.
+    """
     url = f"{TIKTOK_API_BASE}{endpoint}"
     headers = {"Access-Token": access_token}
     data = {"advertiser_id": advertiser_id}
     if extra_data:
         data.update(extra_data)
     try:
+        # Read file content and compute MD5 signature
         with open(file_path, "rb") as f:
-            files = {file_field: (os.path.basename(file_path), f, "video/mp4")}
-            resp = requests.post(url, headers=headers, data=data, files=files, timeout=120)
+            file_content = f.read()
+
+        md5_hash = hashlib.md5(file_content).hexdigest()
+        data["video_signature"] = md5_hash
+        logger.info(f"Upload: file={os.path.basename(file_path)}, size={len(file_content)}, md5={md5_hash}")
+
+        # Send multipart with file content from memory
+        files = {file_field: (os.path.basename(file_path), io.BytesIO(file_content), "video/mp4")}
+        resp = requests.post(url, headers=headers, data=data, files=files, timeout=120)
         resp.raise_for_status()
-        return resp.json()
+        result = resp.json()
+        logger.info(f"Upload response: code={result.get('code')}, message={result.get('message')}")
+        return result
     except Exception as e:
         logger.error(f"TikTok upload error: {e}")
         return {"code": -1, "message": str(e)}
@@ -121,18 +137,18 @@ def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
     """Find best identity for ad creation.
 
     As of early 2026, TikTok has deprecated CUSTOMIZED_USER identities.
-    TT_USER is now the primary identity for ALL ad types (both regular and Spark Ads).
+    TT_USER is now the primary identity for Spark Ads (video-based).
 
     Priority: TT_USER > BC_AUTH_TT > CUSTOMIZED_USER (deprecated fallback)
     """
-    # Priority 1: TT_USER (primary for all ads - linked TikTok account)
+    # Priority 1: TT_USER (primary for Spark Ads - linked TikTok account)
     result = _tiktok_api("GET", "/identity/get/", access_token,
                          params={"advertiser_id": advertiser_id, "identity_type": "TT_USER"})
     if result.get("code") == 0:
         identities = result.get("data", {}).get("identity_list", [])
         if identities:
             ident = identities[0]
-            logger.info(f"Using TT_USER identity: {ident.get('identity_id')} ({ident.get('display_name')}) - primary for all ads")
+            logger.info(f"Using TT_USER identity: {ident.get('identity_id')} ({ident.get('display_name')}) - Spark Ads video-first")
             return {"identity_id": ident.get("identity_id"),
                     "identity_type": "TT_USER",
                     "display_name": ident.get("display_name", "Court Sportswear"),
@@ -265,7 +281,10 @@ def _download_images_for_video(image_urls: list, max_images: int = 5) -> list:
 
 def _generate_and_upload_video(access_token: str, advertiser_id: str,
                                 image_urls: list = None) -> dict:
-    """Full pipeline: download images -> create video -> upload to TikTok."""
+    """Full pipeline: download images -> create video -> upload to TikTok.
+
+    v0.7.0: Upload now includes video_signature (MD5 hash) required by TikTok.
+    """
     if not image_urls:
         image_urls = _get_product_images()[:5]
     steps = []
@@ -277,7 +296,8 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
 
     video_path = tempfile.mktemp(suffix=".mp4")
     success = _create_minimal_mp4(image_paths, video_path, duration_per_image=3)
-    steps.append({"step": "create_video", "success": success})
+    steps.append({"step": "create_video", "success": success,
+                  "file_size": os.path.getsize(video_path) if success and os.path.exists(video_path) else 0})
 
     for p in image_paths:
         try:
@@ -296,9 +316,11 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
             extra_data={"upload_type": "UPLOAD_BY_FILE",
                        "file_name": f"court_sportswear_{int(time.time())}.mp4"})
         steps.append({"step": "upload_video", "code": result.get("code"),
-                      "message": result.get("message")})
+                      "message": result.get("message"),
+                      "video_id": result.get("data", {}).get("video_id", "") if result.get("code") == 0 else ""})
         if result.get("code") == 0:
             video_id = result.get("data", {}).get("video_id", "")
+            logger.info(f"Video uploaded successfully: {video_id}")
     except Exception as e:
         steps.append({"step": "upload_video", "error": str(e)})
 
@@ -317,63 +339,20 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
                    campaign_id: str = "") -> dict:
     """Try multiple ad creation strategies in priority order.
 
-    As of early 2026, TikTok requires TT_USER identity for all ads.
-    CUSTOMIZED_USER is deprecated and returns "Custom identities are no longer supported."
+    v0.7.0: Video-first strategy for Spark Ads.
+    TT_USER identity = Spark Ads = requires VIDEO content.
+    SINGLE_IMAGE + TT_USER will always fail ("source of this post is invalid").
 
-    Strategy 1: SINGLE_IMAGE + TT_USER (primary for all in-feed ads)
-    Strategy 2: SINGLE_IMAGE + TT_USER without CTA (CTA compatibility fallback)
-    Strategy 3: SINGLE_VIDEO + TT_USER (when video available)
-    Strategy 4: Pangle display network with TT_USER (includes location_ids)
+    Strategy 1: SINGLE_VIDEO + TT_USER (Spark Ads - push new video to linked account)
+    Strategy 2: SINGLE_VIDEO + TT_USER without CTA (CTA compatibility fallback)
+    Strategy 3: Pangle display network (audience network fallback - supports images)
     """
     identity_id = identity.get("identity_id", "")
     identity_type = identity.get("identity_type", "TT_USER")
     display_name = identity.get("display_name", "Court Sportswear")
     attempts = []
 
-    # ── Strategy 1: SINGLE_IMAGE + TT_USER (primary for all ads) ──
-    if image_id and identity_id:
-        creative = {
-            "ad_name": f"Court Sportswear - Tennis Apparel {int(time.time()) % 10000}",
-            "ad_text": "Premium tennis & pickleball apparel. Performance gear for every court. Shop now!",
-            "landing_page_url": "https://court-sportswear.com/collections/all",
-            "call_to_action": "SHOP_NOW",
-            "ad_format": "SINGLE_IMAGE",
-            "image_ids": [image_id],
-            "identity_id": identity_id,
-            "identity_type": identity_type,
-        }
-        result = _tiktok_api("POST", "/ad/create/", access_token, data={
-            "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
-            "creatives": [creative], "operation_status": "ENABLE"})
-        attempts.append({"strategy": "image_tt_user", "code": result.get("code"),
-                        "message": result.get("message"), "data": result.get("data"),
-                        "identity_type_used": identity_type})
-        if result.get("code") == 0:
-            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
-                    "strategy": "image_tt_user", "attempts": attempts}
-
-    # ── Strategy 2: SINGLE_IMAGE + TT_USER without CTA ──
-    if image_id and identity_id:
-        creative = {
-            "ad_name": f"Court Sportswear - Performance Gear {int(time.time()) % 10000}",
-            "ad_text": "Premium tennis & pickleball apparel. Shop court-sportswear.com",
-            "landing_page_url": "https://court-sportswear.com/collections/all",
-            "ad_format": "SINGLE_IMAGE",
-            "image_ids": [image_id],
-            "identity_id": identity_id,
-            "identity_type": identity_type,
-        }
-        result = _tiktok_api("POST", "/ad/create/", access_token, data={
-            "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
-            "creatives": [creative], "operation_status": "ENABLE"})
-        attempts.append({"strategy": "image_tt_user_no_cta", "code": result.get("code"),
-                        "message": result.get("message"), "data": result.get("data"),
-                        "identity_type_used": identity_type})
-        if result.get("code") == 0:
-            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
-                    "strategy": "image_tt_user_no_cta", "attempts": attempts}
-
-    # ── Strategy 3: SINGLE_VIDEO + TT_USER (when video available) ──
+    # ── Strategy 1: SINGLE_VIDEO + TT_USER (primary - Spark Ads with video) ──
     if video_id and identity_id:
         creative = {
             "ad_name": f"Court Sportswear - Tennis Video {int(time.time()) % 10000}",
@@ -397,7 +376,30 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
                     "strategy": "video_tt_user", "attempts": attempts}
 
-    # ── Strategy 4: Pangle display network (WITH location_ids - required field) ──
+    # ── Strategy 2: SINGLE_VIDEO + TT_USER without CTA ──
+    if video_id and identity_id:
+        creative = {
+            "ad_name": f"Court Sportswear - Performance Gear {int(time.time()) % 10000}",
+            "ad_text": "Premium tennis & pickleball apparel. Shop court-sportswear.com",
+            "landing_page_url": "https://court-sportswear.com/collections/all",
+            "ad_format": "SINGLE_VIDEO",
+            "video_id": video_id,
+            "identity_id": identity_id,
+            "identity_type": identity_type,
+        }
+        if image_id:
+            creative["image_ids"] = [image_id]  # thumbnail
+        result = _tiktok_api("POST", "/ad/create/", access_token, data={
+            "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
+            "creatives": [creative], "operation_status": "ENABLE"})
+        attempts.append({"strategy": "video_tt_user_no_cta", "code": result.get("code"),
+                        "message": result.get("message"), "data": result.get("data"),
+                        "identity_type_used": identity_type})
+        if result.get("code") == 0:
+            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
+                    "strategy": "video_tt_user_no_cta", "attempts": attempts}
+
+    # ── Strategy 3: Pangle display network (supports images, no TT_USER required) ──
     if image_id and campaign_id and identity_id:
         schedule_start = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         ag_result = _tiktok_api("POST", "/adgroup/create/", access_token, data={
@@ -438,6 +440,10 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
                 return {"success": True, "ad_ids": ad_result.get("data", {}).get("ad_ids", []),
                         "pangle_adgroup_id": pangle_ag_id, "strategy": "pangle_image",
                         "attempts": attempts}
+
+    # If no video and no strategies worked, provide clear error
+    if not video_id:
+        attempts.append({"strategy": "info", "message": "No video_id available. TT_USER Spark Ads require video content. Check ffmpeg availability."})
 
     return {"success": False, "attempts": attempts}
 
@@ -524,7 +530,7 @@ def check_tiktok_status(db: Session = Depends(get_db)):
 def launch_campaign(daily_budget: float = Query(20.0),
                     campaign_name: str = Query("Court Sportswear - Tennis Apparel"),
                     db: Session = Depends(get_db)):
-    """Full campaign launch: campaign -> ad group -> upload images -> create ad."""
+    """Full campaign launch: campaign -> ad group -> upload images -> generate video -> create ad."""
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"success": False, "error": "TikTok not connected."}
@@ -560,22 +566,22 @@ def launch_campaign(daily_budget: float = Query(20.0),
             return {"success": False, "error": ag.get("message"), "steps": steps, "campaign_id": campaign_id}
         adgroup_id = ag["data"]["adgroup_id"]
 
-        # Step 3: Upload product images
+        # Step 3: Upload product images (for thumbnails)
         product_urls = _get_product_images()[:5]
         image_ids = _upload_images(access_token, advertiser_id, product_urls)
         steps.append({"step": "upload_images", "count": len(image_ids)})
 
-        # Step 4: Generate and upload video (may fail if no ffmpeg - that's OK)
+        # Step 4: Generate and upload video (REQUIRED for TT_USER Spark Ads)
         video_result = _generate_and_upload_video(access_token, advertiser_id, product_urls)
         video_id = video_result.get("video_id", "")
         steps.append({"step": "video_generation", "video_id": video_id,
                       "details": video_result.get("steps", [])})
 
-        # Step 5: Find identity (TT_USER preferred - CUSTOMIZED_USER is deprecated)
+        # Step 5: Find identity (TT_USER for Spark Ads)
         identity = _find_best_identity(access_token, advertiser_id)
         steps.append({"step": "identity", "result": identity})
 
-        # Step 6: Create ad
+        # Step 6: Create ad (video-first strategy)
         image_id = image_ids[0] if image_ids else ""
         ad_result = _try_create_ad(access_token, advertiser_id, adgroup_id,
                                     image_id, identity, video_id, campaign_id)
@@ -597,7 +603,7 @@ def launch_campaign(daily_budget: float = Query(20.0),
         return {"success": True, "campaign_id": campaign_id, "adgroup_id": adgroup_id,
                 "ad_id": ad_id, "video_id": video_id, "daily_budget": adgroup_budget,
                 "ad_strategy": ad_result.get("strategy"),
-                "ad_warning": None if ad_id else "Ad creation pending - check steps",
+                "ad_warning": None if ad_id else "Ad creation pending - video upload may have failed. Check steps.",
                 "steps": steps}
     except Exception as e:
         return {"success": False, "error": str(e), "steps": steps}
@@ -608,30 +614,34 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
                           campaign_id: str = Query("1856672017238274"),
                           image_url: str = Query(None),
                           db: Session = Depends(get_db)):
-    """Create an ad for an existing ad group using TT_USER identity."""
+    """Create an ad for an existing ad group.
+
+    v0.7.0: Video-first Spark Ads strategy.
+    TT_USER identity requires video content - images alone will fail.
+    """
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"success": False, "error": "TikTok not connected"}
     access_token, advertiser_id = creds["access_token"], creds["advertiser_id"]
     steps = []
 
-    # Upload images
+    # Upload images (for thumbnails)
     image_urls = [image_url] if image_url else _get_product_images()[:5]
     image_ids = _upload_images(access_token, advertiser_id, image_urls)
     steps.append({"step": "images", "count": len(image_ids), "ids": image_ids})
 
-    # Generate video (may fail if no ffmpeg - that's OK, image strategies are primary)
+    # Generate and upload video (REQUIRED for TT_USER Spark Ads)
     video_result = _generate_and_upload_video(access_token, advertiser_id, image_urls)
     video_id = video_result.get("video_id", "")
     steps.append({"step": "video", "video_id": video_id, "details": video_result.get("steps", [])})
 
-    # Identity (TT_USER preferred - CUSTOMIZED_USER is deprecated)
+    # Identity (TT_USER for Spark Ads)
     identity = _find_best_identity(access_token, advertiser_id)
     steps.append({"step": "identity", "result": identity})
     if not identity.get("identity_id"):
         return {"success": False, "error": "No identity found. Link a TikTok account in TikTok Ads Manager.", "steps": steps}
 
-    # Try ad creation strategies
+    # Try ad creation strategies (video-first)
     image_id = image_ids[0] if image_ids else ""
     ad_result = _try_create_ad(access_token, advertiser_id, adgroup_id,
                                 image_id, identity, video_id, campaign_id)
@@ -641,7 +651,7 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
         return {"success": True, "ad_ids": ad_result.get("ad_ids", []),
                 "strategy": ad_result.get("strategy"),
                 "video_id": video_id, "steps": steps}
-    return {"success": False, "error": "All strategies failed", "steps": steps}
+    return {"success": False, "error": "All strategies failed. Video upload may have failed - check steps for details.", "steps": steps}
 
 
 # ── Video Upload Endpoints ──
