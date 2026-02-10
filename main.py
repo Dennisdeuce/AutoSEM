@@ -14,18 +14,19 @@ from app.routers import products, campaigns, dashboard, settings, automation, me
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("AutoSEM")
 
+VERSION = "0.5.0"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("\U0001f680 AutoSEM starting up...")
     Base.metadata.create_all(bind=engine)
     logger.info("\u2705 Database tables created")
-    logger.info("\u2705 All routers loaded (meta, tiktok, deploy) - v0.4.0 TT_USER Push Spark Ads")
+    logger.info(f"\u2705 All routers loaded - v{VERSION} CUSTOMIZED_USER for in-feed ads")
     yield
     logger.info("\U0001f44b AutoSEM shutting down...")
 
 
-app = FastAPI(title="AutoSEM", version="0.4.0", docs_url="/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
+app = FastAPI(title="AutoSEM", version=VERSION, docs_url="/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -42,7 +43,12 @@ app.include_router(deploy.router, prefix="/api/v1/deploy", tags=["deploy"])
 
 @app.get("/", summary="Root")
 async def root():
-    return {"message": "Welcome to AutoSEM v0.4.0", "dashboard": "/dashboard", "tiktok_setup": "/tiktok-setup"}
+    return {"message": f"Welcome to AutoSEM v{VERSION}", "dashboard": "/dashboard", "tiktok_setup": "/tiktok-setup"}
+
+
+@app.get("/version", summary="Version")
+async def version():
+    return {"version": VERSION}
 
 
 @app.get("/dashboard", summary="Dashboard", response_class=HTMLResponse)
@@ -60,9 +66,9 @@ async def dashboard_page():
 
 @app.get("/health", summary="Health Check")
 async def health_check():
-    return {"status": "healthy", "version": "0.4.0", "tiktok_router": "loaded", "deploy_router": "loaded",
-            "features": ["tt_user_push_spark_ads", "single_image_ads", "single_video_ads", "multi_strategy_ads", "pangle_fallback"],
-            "note": "CUSTOMIZED_USER deprecated by TikTok. Using TT_USER for Push Spark Ads."}
+    return {"status": "healthy", "version": VERSION, "tiktok_router": "loaded", "deploy_router": "loaded",
+            "features": ["customized_user_identity", "single_image_ads", "single_video_ads", "multi_strategy_ads", "pangle_fallback"],
+            "identity_strategy": "CUSTOMIZED_USER for in-feed ads, TT_USER for Spark Ads only"}
 
 
 @app.get("/tiktok-setup", summary="TikTok Setup Page", response_class=HTMLResponse)
@@ -115,7 +121,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
     <div class="container">
         <div class="card">
             <h1>&#127919; TikTok Ads Setup</h1>
-            <p class="subtitle">Connect your TikTok Business account and launch campaigns (v0.4.0 - TT_USER Push Spark Ads)</p>
+            <p class="subtitle">Connect your TikTok Business account and launch campaigns (v0.5.0 - CUSTOMIZED_USER)</p>
             <div id="status-check">Checking connection status...</div>
         </div>
 
@@ -142,7 +148,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
             <div class="step">
                 <h3>Campaign Settings</h3>
                 <p>Daily Budget: $20.00 | Objective: Traffic | Target: US Tennis Enthusiasts 25-55</p>
-                <p style="margin-top:8px;color:#667eea"><strong>v0.4.0:</strong> Uses TT_USER identity with Push Spark Ads (CUSTOMIZED_USER deprecated by TikTok)</p>
+                <p style="margin-top:8px;color:#667eea"><strong>v0.5.0:</strong> Uses CUSTOMIZED_USER identity for in-feed ads (TT_USER is for Spark Ads only)</p>
             </div>
             <button class="btn btn-success" onclick="launchCampaign()">&#128640; Launch Campaign</button>
             <div id="launch-result"></div>
@@ -324,7 +330,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
     <div class="container">
         <div class="header">
             <h1>&#128640; AutoSEM Dashboard</h1>
-            <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine v0.4.0</p>
+            <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine v0.5.0</p>
         </div>
         <div id="error-banner" class="error-banner"></div>
         <div class="metrics-grid" id="top-metrics">
@@ -381,7 +387,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             <h2>Recent Activity</h2>
             <div id="activity-log"><div class="loading-msg"><div class="spinner"></div> Loading activity...</div></div>
         </div>
-        <div class="footer">AutoSEM v0.4.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
+        <div class="footer">AutoSEM v0.5.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
     </div>
     <script>
         const API = '/api/v1';

@@ -1,20 +1,18 @@
 """TikTok Ads router - OAuth, campaign creation, and performance tracking
 
-Ad creation strategy priority (v0.4.0 - TT_USER Push Spark Ads):
-1. SINGLE_VIDEO + TT_USER (Push Spark Ad - TikTok's native format)
-2. SINGLE_IMAGE + TT_USER (Push Spark Ad - image fallback)
-3. SINGLE_IMAGE + display_name only (legacy non-identity fallback)
-4. Pangle display ad (audience network)
+Ad creation strategy priority (v0.5.0 - CUSTOMIZED_USER for in-feed ads):
+1. SINGLE_IMAGE + CUSTOMIZED_USER (primary - regular in-feed ads)
+2. SINGLE_IMAGE + CUSTOMIZED_USER without CTA (CTA compatibility fallback)
+3. SINGLE_VIDEO + CUSTOMIZED_USER (when video is available)
+4. SINGLE_IMAGE + display_name only (legacy non-identity fallback)
+5. Pangle display ad (audience network, no location_ids)
 
-Identity types (as of early 2026):
-- TT_USER: Linked TikTok account. Required for all ads now that Custom Identity is deprecated.
-  Used for "Push Spark Ads" - upload new creative that gets published under linked account.
-- BC_AUTH_TT: Business Center authorized accounts (alternative to TT_USER)
-- CUSTOMIZED_USER: DEPRECATED by TikTok in early 2026. No longer works for ad creation.
-
-Push Spark Ads: Upload new video/image to Ads Manager, create ad with TT_USER identity.
-  The creative gets published under the linked TikTok Business Account (private mode).
-  No tiktok_item_id needed - that's only for "Pull" Spark Ads (existing organic posts).
+Identity types:
+- CUSTOMIZED_USER: For regular in-feed ads. Requires display_name + profile_image.
+  This is the correct identity for non-Spark ads.
+- TT_USER: For Spark Ads ONLY. Requires tiktok_item_id (existing TikTok post).
+  Using TT_USER without tiktok_item_id causes error 40002 "source of post invalid".
+- BC_AUTH_TT: Business Center authorized accounts.
 """
 
 import os
@@ -123,21 +121,21 @@ def _tiktok_upload(endpoint: str, access_token: str, advertiser_id: str,
 def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
     """Find best identity for ad creation.
 
-    As of early 2026, TikTok has deprecated CUSTOMIZED_USER (Custom Identity).
-    All ads now require a linked TikTok account.
+    For regular in-feed ads: CUSTOMIZED_USER is required.
+    TT_USER is for Spark Ads ONLY (requires tiktok_item_id for existing posts).
 
-    Priority: TT_USER > BC_AUTH_TT > CUSTOMIZED_USER (deprecated, last resort)
+    Priority: CUSTOMIZED_USER > BC_AUTH_TT > TT_USER (Spark Ads only)
     """
-    # Priority 1: TT_USER (linked TikTok account - required for Push Spark Ads)
+    # Priority 1: CUSTOMIZED_USER (correct for regular in-feed ads)
     result = _tiktok_api("GET", "/identity/get/", access_token,
-                         params={"advertiser_id": advertiser_id, "identity_type": "TT_USER"})
+                         params={"advertiser_id": advertiser_id, "identity_type": "CUSTOMIZED_USER"})
     if result.get("code") == 0:
         identities = result.get("data", {}).get("identity_list", [])
         if identities:
             ident = identities[0]
-            logger.info(f"Using TT_USER identity: {ident.get('identity_id')} ({ident.get('display_name')}) - Push Spark Ads")
+            logger.info(f"Using CUSTOMIZED_USER identity: {ident.get('identity_id')} ({ident.get('display_name')}) - regular in-feed ads")
             return {"identity_id": ident.get("identity_id"),
-                    "identity_type": "TT_USER",
+                    "identity_type": "CUSTOMIZED_USER",
                     "display_name": ident.get("display_name", "Court Sportswear"),
                     "profile_image": ident.get("profile_image", "")}
 
@@ -154,16 +152,16 @@ def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
                     "display_name": ident.get("display_name", "Court Sportswear"),
                     "profile_image": ident.get("profile_image", "")}
 
-    # Priority 3: CUSTOMIZED_USER (deprecated - last resort, will likely fail)
+    # Priority 3: TT_USER (Spark Ads only - will only work with tiktok_item_id)
     result = _tiktok_api("GET", "/identity/get/", access_token,
-                         params={"advertiser_id": advertiser_id, "identity_type": "CUSTOMIZED_USER"})
+                         params={"advertiser_id": advertiser_id, "identity_type": "TT_USER"})
     if result.get("code") == 0:
         identities = result.get("data", {}).get("identity_list", [])
         if identities:
             ident = identities[0]
-            logger.warning("Using CUSTOMIZED_USER identity as last resort - DEPRECATED by TikTok")
+            logger.warning("Using TT_USER identity - NOTE: only works for Spark Ads with tiktok_item_id")
             return {"identity_id": ident.get("identity_id"),
-                    "identity_type": "CUSTOMIZED_USER",
+                    "identity_type": "TT_USER",
                     "display_name": ident.get("display_name", "Court Sportswear"),
                     "profile_image": ident.get("profile_image", "")}
 
@@ -320,48 +318,22 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
                    campaign_id: str = "") -> dict:
     """Try multiple ad creation strategies in priority order.
 
-    As of early 2026, TikTok requires TT_USER identity (linked TikTok account).
-    CUSTOMIZED_USER is deprecated and returns "Custom identities are no longer supported."
+    CUSTOMIZED_USER is required for regular in-feed ads.
+    TT_USER is for Spark Ads ONLY (requires tiktok_item_id for existing posts).
 
-    Push Spark Ads: Upload new creative + create ad with TT_USER = Spark Ad published
-    under linked TikTok Business Account. No tiktok_item_id needed.
-
-    Strategy 1: SINGLE_VIDEO + TT_USER (Push Spark Ad - TikTok native video)
-    Strategy 2: SINGLE_IMAGE + TT_USER (Push Spark Ad - image)
-    Strategy 3: SINGLE_IMAGE + display_name only (non-identity legacy fallback)
-    Strategy 4: Pangle display network (image ad)
+    Strategy 1: SINGLE_IMAGE + CUSTOMIZED_USER (primary - regular in-feed ads)
+    Strategy 2: SINGLE_IMAGE + CUSTOMIZED_USER without CTA (CTA compatibility)
+    Strategy 3: SINGLE_VIDEO + CUSTOMIZED_USER (when video available)
+    Strategy 4: SINGLE_IMAGE + display_name only (legacy fallback)
+    Strategy 5: Pangle display network (no location_ids)
     """
     identity_id = identity.get("identity_id", "")
-    identity_type = identity.get("identity_type", "TT_USER")
+    identity_type = identity.get("identity_type", "CUSTOMIZED_USER")
     display_name = identity.get("display_name", "Court Sportswear")
     attempts = []
 
-    # ── Strategy 1: SINGLE_VIDEO + TT_USER (Push Spark Ad - TikTok native) ──
-    if video_id and identity_id and identity_type in ("TT_USER", "BC_AUTH_TT"):
-        creative = {
-            "ad_name": f"Court Sportswear - Tennis Video {int(time.time()) % 10000}",
-            "ad_text": "Premium tennis & pickleball apparel. Performance gear for every court. Shop now!",
-            "landing_page_url": "https://court-sportswear.com/collections/all",
-            "call_to_action": "SHOP_NOW",
-            "ad_format": "SINGLE_VIDEO",
-            "video_id": video_id,
-            "identity_id": identity_id,
-            "identity_type": identity_type,
-        }
-        if image_id:
-            creative["image_ids"] = [image_id]  # thumbnail
-        result = _tiktok_api("POST", "/ad/create/", access_token, data={
-            "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
-            "creatives": [creative], "operation_status": "ENABLE"})
-        attempts.append({"strategy": "video_tt_user_spark", "code": result.get("code"),
-                        "message": result.get("message"), "data": result.get("data"),
-                        "identity_type_used": identity_type})
-        if result.get("code") == 0:
-            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
-                    "strategy": "video_tt_user_spark", "attempts": attempts}
-
-    # ── Strategy 2: SINGLE_IMAGE + TT_USER (Push Spark Ad - image) ──
-    if image_id and identity_id and identity_type in ("TT_USER", "BC_AUTH_TT"):
+    # ── Strategy 1: SINGLE_IMAGE + CUSTOMIZED_USER (primary for in-feed ads) ──
+    if image_id and identity_id and identity_type == "CUSTOMIZED_USER":
         creative = {
             "ad_name": f"Court Sportswear - Tennis Apparel {int(time.time()) % 10000}",
             "ad_text": "Premium tennis & pickleball apparel. Performance gear for every court. Shop now!",
@@ -370,22 +342,67 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "ad_format": "SINGLE_IMAGE",
             "image_ids": [image_id],
             "identity_id": identity_id,
-            "identity_type": identity_type,
+            "identity_type": "CUSTOMIZED_USER",
         }
         result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
             "creatives": [creative], "operation_status": "ENABLE"})
-        attempts.append({"strategy": "image_tt_user_spark", "code": result.get("code"),
+        attempts.append({"strategy": "image_customized_user", "code": result.get("code"),
                         "message": result.get("message"), "data": result.get("data"),
-                        "identity_type_used": identity_type})
+                        "identity_type_used": "CUSTOMIZED_USER"})
         if result.get("code") == 0:
             return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
-                    "strategy": "image_tt_user_spark", "attempts": attempts}
+                    "strategy": "image_customized_user", "attempts": attempts}
 
-    # ── Strategy 3: SINGLE_IMAGE + display_name only (non-identity fallback) ──
-    if image_id:
+    # ── Strategy 2: SINGLE_IMAGE + CUSTOMIZED_USER without CTA ──
+    if image_id and identity_id and identity_type == "CUSTOMIZED_USER":
         creative = {
             "ad_name": f"Court Sportswear - Performance Gear {int(time.time()) % 10000}",
+            "ad_text": "Premium tennis & pickleball apparel. Shop court-sportswear.com",
+            "landing_page_url": "https://court-sportswear.com/collections/all",
+            "ad_format": "SINGLE_IMAGE",
+            "image_ids": [image_id],
+            "identity_id": identity_id,
+            "identity_type": "CUSTOMIZED_USER",
+        }
+        result = _tiktok_api("POST", "/ad/create/", access_token, data={
+            "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
+            "creatives": [creative], "operation_status": "ENABLE"})
+        attempts.append({"strategy": "image_customized_user_no_cta", "code": result.get("code"),
+                        "message": result.get("message"), "data": result.get("data"),
+                        "identity_type_used": "CUSTOMIZED_USER"})
+        if result.get("code") == 0:
+            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
+                    "strategy": "image_customized_user_no_cta", "attempts": attempts}
+
+    # ── Strategy 3: SINGLE_VIDEO + CUSTOMIZED_USER (when video available) ──
+    if video_id and identity_id and identity_type == "CUSTOMIZED_USER":
+        creative = {
+            "ad_name": f"Court Sportswear - Tennis Video {int(time.time()) % 10000}",
+            "ad_text": "Premium tennis & pickleball apparel. Performance gear for every court. Shop now!",
+            "landing_page_url": "https://court-sportswear.com/collections/all",
+            "call_to_action": "SHOP_NOW",
+            "ad_format": "SINGLE_VIDEO",
+            "video_id": video_id,
+            "identity_id": identity_id,
+            "identity_type": "CUSTOMIZED_USER",
+        }
+        if image_id:
+            creative["image_ids"] = [image_id]  # thumbnail
+        result = _tiktok_api("POST", "/ad/create/", access_token, data={
+            "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
+            "creatives": [creative], "operation_status": "ENABLE"})
+        attempts.append({"strategy": "video_customized_user", "code": result.get("code"),
+                        "message": result.get("message"), "data": result.get("data"),
+                        "identity_type_used": "CUSTOMIZED_USER"})
+        if result.get("code") == 0:
+            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
+                    "strategy": "video_customized_user", "attempts": attempts}
+
+    # ── Strategy 4: SINGLE_IMAGE + display_name only (no identity, legacy) ──
+    if image_id:
+        creative = {
+            "ad_name": f"Court Sportswear - Shop Tennis {int(time.time()) % 10000}",
             "ad_text": "Premium tennis & pickleball apparel. Shop court-sportswear.com",
             "landing_page_url": "https://court-sportswear.com/collections/all",
             "ad_format": "SINGLE_IMAGE",
@@ -401,7 +418,7 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
                     "strategy": "image_display_name_only", "attempts": attempts}
 
-    # ── Strategy 4: Pangle display network (image ad with location_ids) ──
+    # ── Strategy 5: Pangle display network (NO location_ids to avoid permission error) ──
     if image_id and campaign_id and identity_id:
         schedule_start = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         ag_result = _tiktok_api("POST", "/adgroup/create/", access_token, data={
@@ -415,7 +432,6 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "billing_event": "CPC", "optimization_goal": "CLICK",
             "bid_type": "BID_TYPE_NO_BID", "pacing": "PACING_MODE_SMOOTH",
             "operation_status": "ENABLE",
-            "location_ids": ["6252001"],
             "gender": "GENDER_UNLIMITED",
             "age_groups": ["AGE_25_34", "AGE_35_44", "AGE_45_54"],
         })
@@ -528,7 +544,7 @@ def check_tiktok_status(db: Session = Depends(get_db)):
 def launch_campaign(daily_budget: float = Query(20.0),
                     campaign_name: str = Query("Court Sportswear - Tennis Apparel"),
                     db: Session = Depends(get_db)):
-    """Full campaign launch: campaign -> ad group -> upload images -> generate video -> create ad."""
+    """Full campaign launch: campaign -> ad group -> upload images -> create ad."""
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"success": False, "error": "TikTok not connected."}
@@ -569,13 +585,13 @@ def launch_campaign(daily_budget: float = Query(20.0),
         image_ids = _upload_images(access_token, advertiser_id, product_urls)
         steps.append({"step": "upload_images", "count": len(image_ids)})
 
-        # Step 4: Generate and upload video
+        # Step 4: Generate and upload video (may fail if no ffmpeg - that's OK)
         video_result = _generate_and_upload_video(access_token, advertiser_id, product_urls)
         video_id = video_result.get("video_id", "")
         steps.append({"step": "video_generation", "video_id": video_id,
                       "details": video_result.get("steps", [])})
 
-        # Step 5: Find identity (TT_USER preferred - Push Spark Ads)
+        # Step 5: Find identity (CUSTOMIZED_USER preferred for in-feed ads)
         identity = _find_best_identity(access_token, advertiser_id)
         steps.append({"step": "identity", "result": identity})
 
@@ -612,7 +628,7 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
                           campaign_id: str = Query("1856672017238274"),
                           image_url: str = Query(None),
                           db: Session = Depends(get_db)):
-    """Create an ad for an existing ad group using Push Spark Ads (TT_USER)."""
+    """Create an ad for an existing ad group using CUSTOMIZED_USER identity."""
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"success": False, "error": "TikTok not connected"}
@@ -624,16 +640,16 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
     image_ids = _upload_images(access_token, advertiser_id, image_urls)
     steps.append({"step": "images", "count": len(image_ids), "ids": image_ids})
 
-    # Generate video (may fail if no ffmpeg - that's OK, image strategies will be used)
+    # Generate video (may fail if no ffmpeg - that's OK, image strategies are primary)
     video_result = _generate_and_upload_video(access_token, advertiser_id, image_urls)
     video_id = video_result.get("video_id", "")
     steps.append({"step": "video", "video_id": video_id, "details": video_result.get("steps", [])})
 
-    # Identity (TT_USER preferred for Push Spark Ads)
+    # Identity (CUSTOMIZED_USER preferred for in-feed ads)
     identity = _find_best_identity(access_token, advertiser_id)
     steps.append({"step": "identity", "result": identity})
     if not identity.get("identity_id"):
-        return {"success": False, "error": "No TT_USER identity found. Link a TikTok account in TikTok Ads Manager > Business Center.", "steps": steps}
+        return {"success": False, "error": "No identity found. Create a CUSTOMIZED_USER identity in TikTok Ads Manager.", "steps": steps}
 
     # Try ad creation strategies
     image_id = image_ids[0] if image_ids else ""
