@@ -1,11 +1,11 @@
 """TikTok Ads router - OAuth, campaign creation, and performance tracking
 
-Ad creation strategy priority:
-1. SINGLE_IMAGE + CUSTOMIZED_USER on existing adgroup (simplest, no video needed)
-2. SINGLE_VIDEO + CUSTOMIZED_USER (when video available)
-3. SINGLE_VIDEO + display_name only
-4. SINGLE_VIDEO + both identity + display_name
-5. Pangle image ad (audience network, no location restriction)
+Ad creation strategy priority (v0.3.4 - TT_USER identity, CUSTOMIZED_USER deprecated Feb 2026):
+1. SINGLE_IMAGE + TT_USER on existing adgroup (non-Spark ad, no video needed)
+2. SINGLE_IMAGE + TT_USER without CTA (fallback)
+3. SINGLE_VIDEO + TT_USER (when video available)
+4. SINGLE_VIDEO + display_name only
+5. Pangle image ad (audience network, with location_ids)
 """
 
 import os
@@ -112,54 +112,52 @@ def _tiktok_upload(endpoint: str, access_token: str, advertiser_id: str,
 # ── Identity Management ──
 
 def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
-    """Find/create CUSTOMIZED_USER identity (required for regular in-feed ads)."""
-    # First check for existing CUSTOMIZED_USER
-    result = _tiktok_api("GET", "/identity/get/", access_token,
-                         params={"advertiser_id": advertiser_id, "identity_type": "CUSTOMIZED_USER"})
-    if result.get("code") == 0:
-        identities = result.get("data", {}).get("identity_list", [])
-        if identities:
-            return {"identity_id": identities[0].get("identity_id"),
-                    "identity_type": "CUSTOMIZED_USER",
-                    "display_name": identities[0].get("display_name", ""),
-                    "profile_image": identities[0].get("profile_image", "")}
+    """Find best identity for ad creation.
 
-    # Create one if missing
-    identity = _create_custom_identity(access_token, advertiser_id)
-    if identity:
-        return identity
+    As of Feb 2026, CUSTOMIZED_USER is deprecated. TikTok requires a verified
+    TikTok account (TT_USER or BC_AUTH_TT) for all new ads.
 
-    # Last resort: TT_USER (only for Spark Ads)
+    Priority: TT_USER > BC_AUTH_TT > CUSTOMIZED_USER (legacy fallback)
+    """
+    # Priority 1: TT_USER (linked TikTok account - required for new ads)
     result = _tiktok_api("GET", "/identity/get/", access_token,
                          params={"advertiser_id": advertiser_id, "identity_type": "TT_USER"})
     if result.get("code") == 0:
         identities = result.get("data", {}).get("identity_list", [])
         if identities:
-            return {"identity_id": identities[0].get("identity_id"),
+            ident = identities[0]
+            logger.info(f"Using TT_USER identity: {ident.get('identity_id')}")
+            return {"identity_id": ident.get("identity_id"),
                     "identity_type": "TT_USER",
-                    "display_name": identities[0].get("display_name", "")}
-    return {}
+                    "display_name": ident.get("display_name", "Court Sportswear"),
+                    "profile_image": ident.get("profile_image", "")}
 
-
-def _create_custom_identity(access_token: str, advertiser_id: str) -> dict:
-    """Create a CUSTOMIZED_USER identity for Court Sportswear."""
-    img_result = _tiktok_api("POST", "/file/image/ad/upload/", access_token, data={
-        "advertiser_id": advertiser_id, "upload_type": "UPLOAD_BY_URL",
-        "image_url": PRODUCT_IMAGES[0], "file_name": f"cs_profile_{int(time.time())}.jpg",
-    })
-    image_id = ""
-    if img_result.get("code") == 0:
-        image_id = img_result.get("data", {}).get("image_id", "")
-
-    create_data = {"advertiser_id": advertiser_id, "display_name": "Court Sportswear"}
-    if image_id:
-        create_data["image_uri"] = image_id
-
-    result = _tiktok_api("POST", "/identity/create/", access_token, data=create_data)
+    # Priority 2: BC_AUTH_TT (Business Center authorized TikTok account)
+    result = _tiktok_api("GET", "/identity/get/", access_token,
+                         params={"advertiser_id": advertiser_id, "identity_type": "BC_AUTH_TT"})
     if result.get("code") == 0:
-        return {"identity_id": result.get("data", {}).get("identity_id", ""),
-                "identity_type": "CUSTOMIZED_USER", "display_name": "Court Sportswear"}
-    logger.warning(f"Failed to create identity: {result}")
+        identities = result.get("data", {}).get("identity_list", [])
+        if identities:
+            ident = identities[0]
+            logger.info(f"Using BC_AUTH_TT identity: {ident.get('identity_id')}")
+            return {"identity_id": ident.get("identity_id"),
+                    "identity_type": "BC_AUTH_TT",
+                    "display_name": ident.get("display_name", "Court Sportswear"),
+                    "profile_image": ident.get("profile_image", "")}
+
+    # Priority 3: CUSTOMIZED_USER (deprecated, legacy fallback only)
+    result = _tiktok_api("GET", "/identity/get/", access_token,
+                         params={"advertiser_id": advertiser_id, "identity_type": "CUSTOMIZED_USER"})
+    if result.get("code") == 0:
+        identities = result.get("data", {}).get("identity_list", [])
+        if identities:
+            ident = identities[0]
+            logger.warning("Using deprecated CUSTOMIZED_USER identity - migrate to TT_USER")
+            return {"identity_id": ident.get("identity_id"),
+                    "identity_type": "CUSTOMIZED_USER",
+                    "display_name": ident.get("display_name", ""),
+                    "profile_image": ident.get("profile_image", "")}
+
     return {}
 
 
@@ -314,19 +312,22 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
                    campaign_id: str = "") -> dict:
     """Try multiple ad creation strategies in priority order.
 
-    Strategy 1: SINGLE_IMAGE + CUSTOMIZED_USER on existing adgroup (simplest)
-    Strategy 2: SINGLE_VIDEO + CUSTOMIZED_USER (when video available)
-    Strategy 3: SINGLE_VIDEO + display_name only
-    Strategy 4: SINGLE_VIDEO + both identity + display_name
-    Strategy 5: Pangle image ad (no location restriction)
+    As of Feb 2026, TikTok requires TT_USER or BC_AUTH_TT identity.
+    CUSTOMIZED_USER is deprecated and will be rejected.
+
+    Strategy 1: SINGLE_IMAGE + TT_USER (non-Spark ad, no video needed)
+    Strategy 2: SINGLE_IMAGE + TT_USER without CTA (CTA fallback)
+    Strategy 3: SINGLE_VIDEO + TT_USER (when video available)
+    Strategy 4: SINGLE_VIDEO + display_name only
+    Strategy 5: Pangle image ad (with location_ids)
     """
     identity_id = identity.get("identity_id", "")
-    identity_type = identity.get("identity_type", "CUSTOMIZED_USER")
+    identity_type = identity.get("identity_type", "TT_USER")
     display_name = identity.get("display_name", "Court Sportswear")
     attempts = []
 
-    # ── Strategy 1: SINGLE_IMAGE + CUSTOMIZED_USER (no video needed) ──
-    if image_id and identity_id and identity_type == "CUSTOMIZED_USER":
+    # ── Strategy 1: SINGLE_IMAGE + TT_USER (non-Spark ad, no video needed) ──
+    if image_id and identity_id:
         creative = {
             "ad_name": f"Court Sportswear - Tennis Apparel {int(time.time()) % 10000}",
             "ad_text": "Premium tennis & pickleball apparel. Performance gear for every court. Shop now!",
@@ -335,19 +336,19 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "ad_format": "SINGLE_IMAGE",
             "image_ids": [image_id],
             "identity_id": identity_id,
-            "identity_type": "CUSTOMIZED_USER",
+            "identity_type": identity_type,
         }
         result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
             "creatives": [creative], "operation_status": "ENABLE"})
-        attempts.append({"strategy": "image_customized_user", "code": result.get("code"),
+        attempts.append({"strategy": "image_tt_user", "code": result.get("code"),
                         "message": result.get("message"), "data": result.get("data")})
         if result.get("code") == 0:
             return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
-                    "strategy": "image_customized_user", "attempts": attempts}
+                    "strategy": "image_tt_user", "attempts": attempts}
 
     # ── Strategy 2: SINGLE_IMAGE without call_to_action (CTA can cause issues) ──
-    if image_id and identity_id and identity_type == "CUSTOMIZED_USER":
+    if image_id and identity_id:
         creative = {
             "ad_name": f"Court Sportswear - Performance Gear {int(time.time()) % 10000}",
             "ad_text": "Premium tennis & pickleball apparel. Shop court-sportswear.com",
@@ -355,7 +356,7 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "ad_format": "SINGLE_IMAGE",
             "image_ids": [image_id],
             "identity_id": identity_id,
-            "identity_type": "CUSTOMIZED_USER",
+            "identity_type": identity_type,
         }
         result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
@@ -366,7 +367,7 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
                     "strategy": "image_no_cta", "attempts": attempts}
 
-    # ── Strategy 3: SINGLE_VIDEO + CUSTOMIZED_USER (TikTok's native format) ──
+    # ── Strategy 3: SINGLE_VIDEO + TT_USER (TikTok's native format) ──
     if video_id and identity_id:
         creative = {
             "ad_name": f"Court Sportswear - Video Ad {int(time.time()) % 10000}",
@@ -383,11 +384,11 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
         result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
             "creatives": [creative], "operation_status": "ENABLE"})
-        attempts.append({"strategy": "video_customized_user", "code": result.get("code"),
+        attempts.append({"strategy": "video_tt_user", "code": result.get("code"),
                         "message": result.get("message"), "data": result.get("data")})
         if result.get("code") == 0:
             return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
-                    "strategy": "video_customized_user", "attempts": attempts}
+                    "strategy": "video_tt_user", "attempts": attempts}
 
     # ── Strategy 4: SINGLE_VIDEO + display_name only ──
     if video_id:
@@ -411,7 +412,7 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
                     "strategy": "video_display_name", "attempts": attempts}
 
-    # ── Strategy 5: Pangle image ad (no location_ids - fixes permission error) ──
+    # ── Strategy 5: Pangle image ad (with location_ids - required field) ──
     if image_id and campaign_id and identity_id:
         schedule_start = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         ag_result = _tiktok_api("POST", "/adgroup/create/", access_token, data={
@@ -425,6 +426,7 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "billing_event": "CPC", "optimization_goal": "CLICK",
             "bid_type": "BID_TYPE_NO_BID", "pacing": "PACING_MODE_SMOOTH",
             "operation_status": "ENABLE",
+            "location_ids": ["6252001"],
             "gender": "GENDER_UNLIMITED",
             "age_groups": ["AGE_25_34", "AGE_35_44", "AGE_45_54"],
         })
@@ -584,7 +586,7 @@ def launch_campaign(daily_budget: float = Query(20.0),
         steps.append({"step": "video_generation", "video_id": video_id,
                       "details": video_result.get("steps", [])})
 
-        # Step 5: Find/create identity
+        # Step 5: Find identity (TT_USER preferred)
         identity = _find_best_identity(access_token, advertiser_id)
         steps.append({"step": "identity", "result": identity})
 
@@ -638,11 +640,11 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
     video_id = video_result.get("video_id", "")
     steps.append({"step": "video", "video_id": video_id, "details": video_result.get("steps", [])})
 
-    # Identity
+    # Identity (TT_USER preferred)
     identity = _find_best_identity(access_token, advertiser_id)
     steps.append({"step": "identity", "result": identity})
     if not identity.get("identity_id"):
-        return {"success": False, "error": "No identity found", "steps": steps}
+        return {"success": False, "error": "No identity found. Link a TikTok account in Business Center.", "steps": steps}
 
     # Try ad creation strategies
     image_id = image_ids[0] if image_ids else ""
