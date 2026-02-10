@@ -1,10 +1,11 @@
 """TikTok Ads router - OAuth, campaign creation, and performance tracking
 
-Key design decisions:
-- CUSTOMIZED_USER identity for regular in-feed ads (not TT_USER which is Spark Ads only)
-- SINGLE_VIDEO ad format required for TikTok feed (SINGLE_IMAGE only works on Pangle)
-- Video generation from product images using ffmpeg (9:16 vertical format)
-- Multi-strategy ad creation with proper fallbacks
+Ad creation strategy priority:
+1. SINGLE_IMAGE + CUSTOMIZED_USER on existing adgroup (simplest, no video needed)
+2. SINGLE_VIDEO + CUSTOMIZED_USER (when video available)
+3. SINGLE_VIDEO + display_name only
+4. SINGLE_VIDEO + both identity + display_name
+5. Pangle image ad (audience network, no location restriction)
 """
 
 import os
@@ -14,7 +15,6 @@ import logging
 import time
 import tempfile
 import subprocess
-import struct
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -45,19 +45,13 @@ PRODUCT_IMAGES = [
 # ── Core Helpers ──
 
 def _get_ffmpeg_path() -> str:
-    """Find ffmpeg executable - try system PATH first, then imageio-ffmpeg bundle.
-    
-    Returns the path to ffmpeg executable, or empty string if not found.
-    """
-    # Try system ffmpeg first
+    """Find ffmpeg: system PATH -> imageio-ffmpeg bundle -> empty string."""
     try:
         result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
         if result.returncode == 0:
             return "ffmpeg"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-
-    # Try imageio-ffmpeg bundled binary
     try:
         import imageio_ffmpeg
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -67,7 +61,6 @@ def _get_ffmpeg_path() -> str:
             return ffmpeg_exe
     except (ImportError, FileNotFoundError, subprocess.TimeoutExpired) as e:
         logger.warning(f"imageio-ffmpeg not available: {e}")
-
     return ""
 
 
@@ -99,7 +92,7 @@ def _tiktok_api(method: str, endpoint: str, access_token: str, params: dict = No
 def _tiktok_upload(endpoint: str, access_token: str, advertiser_id: str,
                    file_path: str, file_field: str = "video_file",
                    extra_data: dict = None) -> dict:
-    """Upload a file (video/image) to TikTok using multipart form data."""
+    """Upload a file to TikTok using multipart form data."""
     url = f"{TIKTOK_API_BASE}{endpoint}"
     headers = {"Access-Token": access_token}
     data = {"advertiser_id": advertiser_id}
@@ -119,13 +112,8 @@ def _tiktok_upload(endpoint: str, access_token: str, advertiser_id: str,
 # ── Identity Management ──
 
 def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
-    """Find the best identity for ad creation.
-    
-    Priority for regular in-feed ads:
-    1. CUSTOMIZED_USER - works for non-Spark ads (regular in-feed)
-    2. TT_USER - only works for Spark Ads (sponsoring existing posts)
-    """
-    # First try CUSTOMIZED_USER (needed for regular ads)
+    """Find/create CUSTOMIZED_USER identity (required for regular in-feed ads)."""
+    # First check for existing CUSTOMIZED_USER
     result = _tiktok_api("GET", "/identity/get/", access_token,
                          params={"advertiser_id": advertiser_id, "identity_type": "CUSTOMIZED_USER"})
     if result.get("code") == 0:
@@ -136,12 +124,12 @@ def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
                     "display_name": identities[0].get("display_name", ""),
                     "profile_image": identities[0].get("profile_image", "")}
 
-    # Create a CUSTOMIZED_USER if none exists
+    # Create one if missing
     identity = _create_custom_identity(access_token, advertiser_id)
     if identity:
         return identity
 
-    # Fallback to TT_USER (limited to Spark Ads)
+    # Last resort: TT_USER (only for Spark Ads)
     result = _tiktok_api("GET", "/identity/get/", access_token,
                          params={"advertiser_id": advertiser_id, "identity_type": "TT_USER"})
     if result.get("code") == 0:
@@ -155,32 +143,22 @@ def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
 
 def _create_custom_identity(access_token: str, advertiser_id: str) -> dict:
     """Create a CUSTOMIZED_USER identity for Court Sportswear."""
-    # First upload a profile image
     img_result = _tiktok_api("POST", "/file/image/ad/upload/", access_token, data={
-        "advertiser_id": advertiser_id,
-        "upload_type": "UPLOAD_BY_URL",
-        "image_url": PRODUCT_IMAGES[0],
-        "file_name": f"cs_profile_{int(time.time())}.jpg",
+        "advertiser_id": advertiser_id, "upload_type": "UPLOAD_BY_URL",
+        "image_url": PRODUCT_IMAGES[0], "file_name": f"cs_profile_{int(time.time())}.jpg",
     })
     image_id = ""
     if img_result.get("code") == 0:
         image_id = img_result.get("data", {}).get("image_id", "")
-    elif img_result.get("code") == 40911:
-        logger.info("Profile image already uploaded")
 
-    # Create the identity
-    create_data = {
-        "advertiser_id": advertiser_id,
-        "display_name": "Court Sportswear",
-    }
+    create_data = {"advertiser_id": advertiser_id, "display_name": "Court Sportswear"}
     if image_id:
         create_data["image_uri"] = image_id
 
     result = _tiktok_api("POST", "/identity/create/", access_token, data=create_data)
     if result.get("code") == 0:
-        identity_id = result.get("data", {}).get("identity_id", "")
-        return {"identity_id": identity_id, "identity_type": "CUSTOMIZED_USER",
-                "display_name": "Court Sportswear"}
+        return {"identity_id": result.get("data", {}).get("identity_id", ""),
+                "identity_type": "CUSTOMIZED_USER", "display_name": "Court Sportswear"}
     logger.warning(f"Failed to create identity: {result}")
     return {}
 
@@ -217,10 +195,10 @@ def _upload_images(access_token: str, advertiser_id: str, image_urls: list) -> l
             if img_id:
                 image_ids.append(img_id)
         elif result.get("code") == 40911:
-            logger.info(f"Duplicate image: {url}")
+            # Duplicate - try with unique name
             result2 = _tiktok_api("POST", "/file/image/ad/upload/", access_token, data={
                 "advertiser_id": advertiser_id, "upload_type": "UPLOAD_BY_URL", "image_url": url,
-                "file_name": f"cs_unique_{int(time.time())}_{len(image_ids)}.jpg",
+                "file_name": f"cs_u{int(time.time())}_{len(image_ids)}.jpg",
             })
             if result2.get("code") == 0:
                 img_id = result2.get("data", {}).get("image_id", "")
@@ -232,20 +210,10 @@ def _upload_images(access_token: str, advertiser_id: str, image_urls: list) -> l
 # ── Video Generation ──
 
 def _create_minimal_mp4(image_paths: list, output_path: str, duration_per_image: int = 3) -> bool:
-    """Create an MP4 video from images using ffmpeg.
-    
-    Creates a 9:16 vertical video (1080x1920) suitable for TikTok.
-    Each image is shown for `duration_per_image` seconds.
-    Uses system ffmpeg or falls back to imageio-ffmpeg bundled binary.
-    """
+    """Create 9:16 vertical MP4 from images using ffmpeg."""
     ffmpeg_exe = _get_ffmpeg_path()
-    if not ffmpeg_exe:
-        logger.error("ffmpeg not available (system or bundled)")
+    if not ffmpeg_exe or not image_paths:
         return False
-
-    if not image_paths:
-        return False
-
     try:
         list_path = output_path + ".txt"
         with open(list_path, "w") as f:
@@ -253,32 +221,24 @@ def _create_minimal_mp4(image_paths: list, output_path: str, duration_per_image:
                 f.write(f"file '{img}'\n")
                 f.write(f"duration {duration_per_image}\n")
             f.write(f"file '{image_paths[-1]}'\n")
-
         cmd = [
-            ffmpeg_exe, "-y",
-            "-f", "concat", "-safe", "0", "-i", list_path,
+            ffmpeg_exe, "-y", "-f", "concat", "-safe", "0", "-i", list_path,
             "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-r", "30",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
             "-movflags", "+faststart",
-            "-t", str(len(image_paths) * duration_per_image),
-            output_path,
+            "-t", str(len(image_paths) * duration_per_image), output_path,
         ]
         result = subprocess.run(cmd, capture_output=True, timeout=120)
-
         try:
             os.remove(list_path)
         except Exception:
             pass
-
         if result.returncode == 0 and os.path.exists(output_path):
             size = os.path.getsize(output_path)
             logger.info(f"Video created: {output_path} ({size} bytes)")
             return size > 1000
-        else:
-            logger.error(f"ffmpeg failed: {result.stderr.decode()[:500]}")
-            return False
+        logger.error(f"ffmpeg failed: {result.stderr.decode()[:500]}")
+        return False
     except Exception as e:
         logger.error(f"Video creation error: {e}")
         return False
@@ -291,8 +251,7 @@ def _download_images_for_video(image_urls: list, max_images: int = 5) -> list:
         try:
             resp = requests.get(url, timeout=15)
             if resp.status_code == 200:
-                suffix = ".jpg"
-                tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+                tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
                 tmp.write(resp.content)
                 tmp.close()
                 paths.append(tmp.name)
@@ -303,28 +262,20 @@ def _download_images_for_video(image_urls: list, max_images: int = 5) -> list:
 
 def _generate_and_upload_video(access_token: str, advertiser_id: str,
                                 image_urls: list = None) -> dict:
-    """Full pipeline: download images -> create video -> upload to TikTok.
-    
-    Returns dict with video_id and details, or empty dict on failure.
-    """
+    """Full pipeline: download images -> create video -> upload to TikTok."""
     if not image_urls:
         image_urls = _get_product_images()[:5]
-
     steps = []
 
-    # Step 1: Download images
     image_paths = _download_images_for_video(image_urls)
     steps.append({"step": "download_images", "count": len(image_paths)})
     if not image_paths:
         return {"video_id": "", "steps": steps, "error": "No images downloaded"}
 
-    # Step 2: Create video
     video_path = tempfile.mktemp(suffix=".mp4")
     success = _create_minimal_mp4(image_paths, video_path, duration_per_image=3)
-    steps.append({"step": "create_video", "success": success,
-                  "path": video_path if success else ""})
+    steps.append({"step": "create_video", "success": success})
 
-    # Clean up image files
     for p in image_paths:
         try:
             os.remove(p)
@@ -334,15 +285,13 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
     if not success:
         return {"video_id": "", "steps": steps, "error": "Video creation failed (ffmpeg)"}
 
-    # Step 3: Upload video to TikTok
     video_id = ""
     try:
         result = _tiktok_upload(
             "/file/video/ad/upload/", access_token, advertiser_id,
             video_path, file_field="video_file",
             extra_data={"upload_type": "UPLOAD_BY_FILE",
-                       "file_name": f"court_sportswear_{int(time.time())}.mp4"}
-        )
+                       "file_name": f"court_sportswear_{int(time.time())}.mp4"})
         steps.append({"step": "upload_video", "code": result.get("code"),
                       "message": result.get("message")})
         if result.get("code") == 0:
@@ -350,7 +299,6 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
     except Exception as e:
         steps.append({"step": "upload_video", "error": str(e)})
 
-    # Clean up video file
     try:
         os.remove(video_path)
     except Exception:
@@ -364,22 +312,64 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
 def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
                    image_id: str, identity: dict, video_id: str = "",
                    campaign_id: str = "") -> dict:
-    """Try multiple ad creation strategies.
-    
-    Strategy priority:
-    1. SINGLE_VIDEO with CUSTOMIZED_USER (best for TikTok feed)
-    2. SINGLE_VIDEO with display_name only (alternate custom identity format)
-    3. SINGLE_IMAGE on dedicated Pangle ad group (audience network accepts images)
+    """Try multiple ad creation strategies in priority order.
+
+    Strategy 1: SINGLE_IMAGE + CUSTOMIZED_USER on existing adgroup (simplest)
+    Strategy 2: SINGLE_VIDEO + CUSTOMIZED_USER (when video available)
+    Strategy 3: SINGLE_VIDEO + display_name only
+    Strategy 4: SINGLE_VIDEO + both identity + display_name
+    Strategy 5: Pangle image ad (no location restriction)
     """
     identity_id = identity.get("identity_id", "")
     identity_type = identity.get("identity_type", "CUSTOMIZED_USER")
     display_name = identity.get("display_name", "Court Sportswear")
     attempts = []
 
-    # Strategy 1: Video ad with CUSTOMIZED_USER identity (primary - TikTok feed)
+    # ── Strategy 1: SINGLE_IMAGE + CUSTOMIZED_USER (no video needed) ──
+    if image_id and identity_id and identity_type == "CUSTOMIZED_USER":
+        creative = {
+            "ad_name": f"Court Sportswear - Tennis Apparel {int(time.time()) % 10000}",
+            "ad_text": "Premium tennis & pickleball apparel. Performance gear for every court. Shop now!",
+            "landing_page_url": "https://court-sportswear.com/collections/all",
+            "call_to_action": "SHOP_NOW",
+            "ad_format": "SINGLE_IMAGE",
+            "image_ids": [image_id],
+            "identity_id": identity_id,
+            "identity_type": "CUSTOMIZED_USER",
+        }
+        result = _tiktok_api("POST", "/ad/create/", access_token, data={
+            "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
+            "creatives": [creative], "operation_status": "ENABLE"})
+        attempts.append({"strategy": "image_customized_user", "code": result.get("code"),
+                        "message": result.get("message"), "data": result.get("data")})
+        if result.get("code") == 0:
+            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
+                    "strategy": "image_customized_user", "attempts": attempts}
+
+    # ── Strategy 2: SINGLE_IMAGE without call_to_action (CTA can cause issues) ──
+    if image_id and identity_id and identity_type == "CUSTOMIZED_USER":
+        creative = {
+            "ad_name": f"Court Sportswear - Performance Gear {int(time.time()) % 10000}",
+            "ad_text": "Premium tennis & pickleball apparel. Shop court-sportswear.com",
+            "landing_page_url": "https://court-sportswear.com/collections/all",
+            "ad_format": "SINGLE_IMAGE",
+            "image_ids": [image_id],
+            "identity_id": identity_id,
+            "identity_type": "CUSTOMIZED_USER",
+        }
+        result = _tiktok_api("POST", "/ad/create/", access_token, data={
+            "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
+            "creatives": [creative], "operation_status": "ENABLE"})
+        attempts.append({"strategy": "image_no_cta", "code": result.get("code"),
+                        "message": result.get("message"), "data": result.get("data")})
+        if result.get("code") == 0:
+            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
+                    "strategy": "image_no_cta", "attempts": attempts}
+
+    # ── Strategy 3: SINGLE_VIDEO + CUSTOMIZED_USER (TikTok's native format) ──
     if video_id and identity_id:
         creative = {
-            "ad_name": "Court Sportswear - Premium Tennis Apparel",
+            "ad_name": f"Court Sportswear - Video Ad {int(time.time()) % 10000}",
             "ad_text": "Premium tennis & pickleball apparel. Performance gear for every court. Shop now!",
             "landing_page_url": "https://court-sportswear.com/collections/all",
             "call_to_action": "SHOP_NOW",
@@ -389,8 +379,7 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "identity_type": identity_type,
         }
         if image_id:
-            creative["image_ids"] = [image_id]
-
+            creative["image_ids"] = [image_id]  # thumbnail
         result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
             "creatives": [creative], "operation_status": "ENABLE"})
@@ -400,10 +389,10 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
                     "strategy": "video_customized_user", "attempts": attempts}
 
-    # Strategy 2: Video ad with display_name (no identity_id)
+    # ── Strategy 4: SINGLE_VIDEO + display_name only ──
     if video_id:
         creative = {
-            "ad_name": "Court Sportswear - Tennis Collection",
+            "ad_name": f"Court Sportswear - Tennis Video {int(time.time()) % 10000}",
             "ad_text": "Premium tennis & pickleball apparel. Performance gear for every court. Shop now!",
             "landing_page_url": "https://court-sportswear.com/collections/all",
             "call_to_action": "SHOP_NOW",
@@ -413,7 +402,6 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
         }
         if image_id:
             creative["image_ids"] = [image_id]
-
         result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
             "creatives": [creative], "operation_status": "ENABLE"})
@@ -423,37 +411,12 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
                     "strategy": "video_display_name", "attempts": attempts}
 
-    # Strategy 3: Video ad with both identity and display_name
-    if video_id and identity_id:
-        creative = {
-            "ad_name": "Court Sportswear - Tennis Gear",
-            "ad_text": "Premium tennis & pickleball apparel for every court. Shop now!",
-            "landing_page_url": "https://court-sportswear.com/collections/all",
-            "call_to_action": "SHOP_NOW",
-            "ad_format": "SINGLE_VIDEO",
-            "video_id": video_id,
-            "identity_id": identity_id,
-            "identity_type": identity_type,
-            "display_name": display_name,
-        }
-        if image_id:
-            creative["image_ids"] = [image_id]
-
-        result = _tiktok_api("POST", "/ad/create/", access_token, data={
-            "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
-            "creatives": [creative], "operation_status": "ENABLE"})
-        attempts.append({"strategy": "video_both_identity", "code": result.get("code"),
-                        "message": result.get("message"), "data": result.get("data")})
-        if result.get("code") == 0:
-            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
-                    "strategy": "video_both_identity", "attempts": attempts}
-
-    # Strategy 4: Image ad on Pangle placement (separate ad group)
-    if image_id and campaign_id:
+    # ── Strategy 5: Pangle image ad (no location_ids - fixes permission error) ──
+    if image_id and campaign_id and identity_id:
         schedule_start = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         ag_result = _tiktok_api("POST", "/adgroup/create/", access_token, data={
             "advertiser_id": advertiser_id, "campaign_id": campaign_id,
-            "adgroup_name": "Court Sportswear - Display Image Ads",
+            "adgroup_name": f"Court Sportswear - Pangle Display {int(time.time()) % 10000}",
             "placement_type": "PLACEMENT_TYPE_NORMAL",
             "placements": ["PLACEMENT_PANGLE"],
             "promotion_type": "WEBSITE",
@@ -462,15 +425,15 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "billing_event": "CPC", "optimization_goal": "CLICK",
             "bid_type": "BID_TYPE_NO_BID", "pacing": "PACING_MODE_SMOOTH",
             "operation_status": "ENABLE",
-            "location_ids": ["6252001"], "gender": "GENDER_UNLIMITED",
+            "gender": "GENDER_UNLIMITED",
             "age_groups": ["AGE_25_34", "AGE_35_44", "AGE_45_54"],
         })
-        attempts.append({"strategy": "pangle_adgroup", "code": ag_result.get("code"),
+        attempts.append({"strategy": "create_pangle_adgroup", "code": ag_result.get("code"),
                          "message": ag_result.get("message")})
         if ag_result.get("code") == 0:
             pangle_ag_id = ag_result.get("data", {}).get("adgroup_id")
             creative = {
-                "ad_name": "Court Sportswear - Tennis Image",
+                "ad_name": f"Court Sportswear - Pangle Image {int(time.time()) % 10000}",
                 "ad_text": "Premium tennis & pickleball apparel. Shop now!",
                 "landing_page_url": "https://court-sportswear.com/collections/all",
                 "call_to_action": "SHOP_NOW",
@@ -574,7 +537,7 @@ def check_tiktok_status(db: Session = Depends(get_db)):
 def launch_campaign(daily_budget: float = Query(20.0),
                     campaign_name: str = Query("Court Sportswear - Tennis Apparel"),
                     db: Session = Depends(get_db)):
-    """Full campaign launch: campaign -> ad group -> generate video -> create ad."""
+    """Full campaign launch: campaign -> ad group -> upload images -> generate video -> create ad."""
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"success": False, "error": "TikTok not connected."}
@@ -593,7 +556,7 @@ def launch_campaign(daily_budget: float = Query(20.0),
             return {"success": False, "error": camp.get("message"), "steps": steps}
         campaign_id = camp["data"]["campaign_id"]
 
-        # Step 2: Create ad group (automatic placement)
+        # Step 2: Create ad group
         schedule = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         ag = _tiktok_api("POST", "/adgroup/create/", access_token, data={
             "advertiser_id": advertiser_id, "campaign_id": campaign_id,
@@ -610,22 +573,22 @@ def launch_campaign(daily_budget: float = Query(20.0),
             return {"success": False, "error": ag.get("message"), "steps": steps, "campaign_id": campaign_id}
         adgroup_id = ag["data"]["adgroup_id"]
 
-        # Step 3: Upload product images (for thumbnail)
+        # Step 3: Upload product images
         product_urls = _get_product_images()[:5]
         image_ids = _upload_images(access_token, advertiser_id, product_urls)
         steps.append({"step": "upload_images", "count": len(image_ids)})
 
-        # Step 4: Generate and upload video from product images
+        # Step 4: Generate and upload video
         video_result = _generate_and_upload_video(access_token, advertiser_id, product_urls)
         video_id = video_result.get("video_id", "")
         steps.append({"step": "video_generation", "video_id": video_id,
                       "details": video_result.get("steps", [])})
 
-        # Step 5: Find/create CUSTOMIZED_USER identity
+        # Step 5: Find/create identity
         identity = _find_best_identity(access_token, advertiser_id)
         steps.append({"step": "identity", "result": identity})
 
-        # Step 6: Create ad (video first, image fallback)
+        # Step 6: Create ad (image first, video if available, pangle fallback)
         image_id = image_ids[0] if image_ids else ""
         ad_result = _try_create_ad(access_token, advertiser_id, adgroup_id,
                                     image_id, identity, video_id, campaign_id)
@@ -641,13 +604,13 @@ def launch_campaign(daily_budget: float = Query(20.0),
                              daily_budget=adgroup_budget))
         db.add(ActivityLogModel(action="TIKTOK_CAMPAIGN_LAUNCHED", entity_type="campaign",
                                 entity_id=str(campaign_id),
-                                details=f"Campaign: {campaign_id}, AdGroup: {adgroup_id}, Ad: {ad_id}, Video: {video_id}"))
+                                details=f"Campaign: {campaign_id}, AdGroup: {adgroup_id}, Ad: {ad_id}, Video: {video_id}, Strategy: {ad_result.get('strategy', 'none')}"))
         db.commit()
 
         return {"success": True, "campaign_id": campaign_id, "adgroup_id": adgroup_id,
                 "ad_id": ad_id, "video_id": video_id, "daily_budget": adgroup_budget,
                 "ad_strategy": ad_result.get("strategy"),
-                "ad_warning": None if ad_id else "Ad creation pending - check steps for details",
+                "ad_warning": None if ad_id else "Ad creation pending - check steps",
                 "steps": steps}
     except Exception as e:
         return {"success": False, "error": str(e), "steps": steps}
@@ -658,7 +621,7 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
                           campaign_id: str = Query("1856672017238274"),
                           image_url: str = Query(None),
                           db: Session = Depends(get_db)):
-    """Create an ad for an existing ad group. Generates video from product images."""
+    """Create an ad for an existing ad group."""
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"success": False, "error": "TikTok not connected"}
@@ -666,25 +629,22 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
     steps = []
 
     # Upload images
-    if image_url:
-        image_urls = [image_url]
-    else:
-        image_urls = _get_product_images()[:5]
+    image_urls = [image_url] if image_url else _get_product_images()[:5]
     image_ids = _upload_images(access_token, advertiser_id, image_urls)
     steps.append({"step": "images", "count": len(image_ids), "ids": image_ids})
 
-    # Generate and upload video
+    # Generate video
     video_result = _generate_and_upload_video(access_token, advertiser_id, image_urls)
     video_id = video_result.get("video_id", "")
     steps.append({"step": "video", "video_id": video_id, "details": video_result.get("steps", [])})
 
-    # Identity (CUSTOMIZED_USER preferred)
+    # Identity
     identity = _find_best_identity(access_token, advertiser_id)
     steps.append({"step": "identity", "result": identity})
     if not identity.get("identity_id"):
         return {"success": False, "error": "No identity found", "steps": steps}
 
-    # Try ad creation
+    # Try ad creation strategies
     image_id = image_ids[0] if image_ids else ""
     ad_result = _try_create_ad(access_token, advertiser_id, adgroup_id,
                                 image_id, identity, video_id, campaign_id)
@@ -701,27 +661,21 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
 
 @router.post("/generate-video", summary="Generate and upload video from product images")
 def generate_video_endpoint(db: Session = Depends(get_db)):
-    """Generate a product showcase video and upload to TikTok."""
     creds = _get_active_token(db)
     if not creds["access_token"]:
         return {"error": "Not connected"}
-    image_urls = _get_product_images()[:5]
-    result = _generate_and_upload_video(creds["access_token"], creds["advertiser_id"], image_urls)
-    return result
+    return _generate_and_upload_video(creds["access_token"], creds["advertiser_id"],
+                                      _get_product_images()[:5])
 
 
 @router.post("/upload-video-url", summary="Upload video from URL")
 def upload_video_from_url(video_url: str = Query(...), db: Session = Depends(get_db)):
-    """Upload a video to TikTok from a URL."""
     creds = _get_active_token(db)
     if not creds["access_token"]:
         return {"error": "Not connected"}
     result = _tiktok_api("POST", "/file/video/ad/upload/", creds["access_token"], data={
-        "advertiser_id": creds["advertiser_id"],
-        "upload_type": "UPLOAD_BY_URL",
-        "video_url": video_url,
-        "file_name": f"court_sportswear_{int(time.time())}.mp4",
-    })
+        "advertiser_id": creds["advertiser_id"], "upload_type": "UPLOAD_BY_URL",
+        "video_url": video_url, "file_name": f"court_sportswear_{int(time.time())}.mp4"})
     return {"result": result, "video_id": result.get("data", {}).get("video_id", "") if result.get("code") == 0 else ""}
 
 
@@ -735,8 +689,8 @@ def list_images(db: Session = Depends(get_db)):
     result = _tiktok_api("GET", "/file/image/ad/get/", creds["access_token"],
                          params={"advertiser_id": creds["advertiser_id"], "page_size": 50})
     images = result.get("data", {}).get("list", []) if result.get("code") == 0 else []
-    return {"count": len(images), "images": images, "raw_code": result.get("code"),
-            "raw_message": result.get("message")}
+    return {"count": len(images), "images": images,
+            "raw_code": result.get("code"), "raw_message": result.get("message")}
 
 
 @router.get("/videos", summary="List uploaded videos")
@@ -747,8 +701,8 @@ def list_videos(db: Session = Depends(get_db)):
     result = _tiktok_api("GET", "/file/video/ad/get/", creds["access_token"],
                          params={"advertiser_id": creds["advertiser_id"], "page_size": 50})
     videos = result.get("data", {}).get("list", []) if result.get("code") == 0 else []
-    return {"count": len(videos), "videos": videos, "raw_code": result.get("code"),
-            "raw_message": result.get("message")}
+    return {"count": len(videos), "videos": videos,
+            "raw_code": result.get("code"), "raw_message": result.get("message")}
 
 
 @router.get("/identities", summary="List all TikTok identities")
@@ -777,10 +731,7 @@ def debug_image_upload(image_url: str = Query(PRODUCT_IMAGES[0]), db: Session = 
 
 @router.get("/debug-ffmpeg", summary="Check ffmpeg availability")
 def debug_ffmpeg():
-    """Check if ffmpeg is available (system or bundled via imageio-ffmpeg)."""
     info = {"system_ffmpeg": False, "bundled_ffmpeg": False, "resolved_path": ""}
-
-    # Check system ffmpeg
     try:
         result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
         if result.returncode == 0:
@@ -788,8 +739,6 @@ def debug_ffmpeg():
             info["system_version"] = result.stdout.decode()[:200]
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-
-    # Check bundled ffmpeg
     try:
         import imageio_ffmpeg
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -797,11 +746,8 @@ def debug_ffmpeg():
         if result.returncode == 0:
             info["bundled_ffmpeg"] = True
             info["bundled_path"] = ffmpeg_exe
-            info["bundled_version"] = result.stdout.decode()[:200]
     except (ImportError, FileNotFoundError, subprocess.TimeoutExpired) as e:
         info["bundled_error"] = str(e)
-
-    # Resolved path
     info["resolved_path"] = _get_ffmpeg_path()
     info["available"] = bool(info["resolved_path"])
     return info
