@@ -20,12 +20,12 @@ async def lifespan(app: FastAPI):
     logger.info("\U0001f680 AutoSEM starting up...")
     Base.metadata.create_all(bind=engine)
     logger.info("\u2705 Database tables created")
-    logger.info("\u2705 All routers loaded (meta, tiktok, deploy) - v0.3.2 video ads")
+    logger.info("\u2705 All routers loaded (meta, tiktok, deploy) - v0.3.4 TT_USER identity")
     yield
     logger.info("\U0001f44b AutoSEM shutting down...")
 
 
-app = FastAPI(title="AutoSEM", version="0.3.2", docs_url="/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
+app = FastAPI(title="AutoSEM", version="0.3.4", docs_url="/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -42,7 +42,7 @@ app.include_router(deploy.router, prefix="/api/v1/deploy", tags=["deploy"])
 
 @app.get("/", summary="Root")
 async def root():
-    return {"message": "Welcome to AutoSEM v0.3.2", "dashboard": "/dashboard", "tiktok_setup": "/tiktok-setup"}
+    return {"message": "Welcome to AutoSEM v0.3.4", "dashboard": "/dashboard", "tiktok_setup": "/tiktok-setup"}
 
 
 @app.get("/dashboard", summary="Dashboard", response_class=HTMLResponse)
@@ -60,7 +60,7 @@ async def dashboard_page():
 
 @app.get("/health", summary="Health Check")
 async def health_check():
-    return {"status": "healthy", "version": "0.3.2", "tiktok_router": "loaded", "deploy_router": "loaded", "features": ["ffmpeg_video_gen", "customized_user_identity", "multi_strategy_ads"]}
+    return {"status": "healthy", "version": "0.3.4", "tiktok_router": "loaded", "deploy_router": "loaded", "features": ["tt_user_identity", "single_image_ads", "ffmpeg_video_gen", "multi_strategy_ads"]}
 
 
 @app.get("/tiktok-setup", summary="TikTok Setup Page", response_class=HTMLResponse)
@@ -113,7 +113,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
     <div class="container">
         <div class="card">
             <h1>&#127919; TikTok Ads Setup</h1>
-            <p class="subtitle">Connect your TikTok Business account and launch campaigns</p>
+            <p class="subtitle">Connect your TikTok Business account and launch campaigns (v0.3.4 - TT_USER identity)</p>
             <div id="status-check">Checking connection status...</div>
         </div>
 
@@ -140,7 +140,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
             <div class="step">
                 <h3>Campaign Settings</h3>
                 <p>Daily Budget: $20.00 | Objective: Traffic | Target: US Tennis Enthusiasts 25-55</p>
-                <p style="margin-top:8px;color:#667eea"><strong>v0.3.2:</strong> Now generates video ads from product images using ffmpeg</p>
+                <p style="margin-top:8px;color:#667eea"><strong>v0.3.4:</strong> Uses TT_USER identity with SINGLE_IMAGE ads (no video required)</p>
             </div>
             <button class="btn btn-success" onclick="launchCampaign()">&#128640; Launch Campaign</button>
             <div id="launch-result"></div>
@@ -196,14 +196,13 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
 
         async function launchCampaign() {
             const el = document.getElementById('launch-result');
-            el.innerHTML = '<div class="status info">Launching campaign with video generation... This may take 30-60 seconds.</div>';
+            el.innerHTML = '<div class="status info">Launching campaign... This may take 30-60 seconds.</div>';
             try {
-                const res = await fetch('/api/v1/tiktok/launch-campaign?daily_budget=20.0&campaign_name=Court+Sportswear+-+Tennis+Video+Ads', { method: 'POST' });
+                const res = await fetch('/api/v1/tiktok/launch-campaign?daily_budget=20.0&campaign_name=Court+Sportswear+-+Tennis+Ads', { method: 'POST' });
                 const data = await res.json();
                 document.getElementById('result').textContent = JSON.stringify(data, null, 2);
                 if (data.success) {
                     let msg = '&#9989; Campaign launched! ID: ' + data.campaign_id;
-                    if (data.video_id) msg += ' | Video: ' + data.video_id;
                     if (data.ad_strategy) msg += ' | Strategy: ' + data.ad_strategy;
                     el.innerHTML = '<div class="status success">' + msg + '</div>';
                 } else {
@@ -323,7 +322,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
     <div class="container">
         <div class="header">
             <h1>&#128640; AutoSEM Dashboard</h1>
-            <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine v0.3.2</p>
+            <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine v0.3.4</p>
         </div>
         <div id="error-banner" class="error-banner"></div>
         <div class="metrics-grid" id="top-metrics">
@@ -380,7 +379,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             <h2>Recent Activity</h2>
             <div id="activity-log"><div class="loading-msg"><div class="spinner"></div> Loading activity...</div></div>
         </div>
-        <div class="footer">AutoSEM v0.3.2 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
+        <div class="footer">AutoSEM v0.3.4 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
     </div>
     <script>
         const API = '/api/v1';
