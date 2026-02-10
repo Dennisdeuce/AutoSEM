@@ -44,6 +44,33 @@ PRODUCT_IMAGES = [
 
 # ── Core Helpers ──
 
+def _get_ffmpeg_path() -> str:
+    """Find ffmpeg executable - try system PATH first, then imageio-ffmpeg bundle.
+    
+    Returns the path to ffmpeg executable, or empty string if not found.
+    """
+    # Try system ffmpeg first
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        if result.returncode == 0:
+            return "ffmpeg"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Try imageio-ffmpeg bundled binary
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        result = subprocess.run([ffmpeg_exe, "-version"], capture_output=True, timeout=5)
+        if result.returncode == 0:
+            logger.info(f"Using bundled ffmpeg: {ffmpeg_exe}")
+            return ffmpeg_exe
+    except (ImportError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"imageio-ffmpeg not available: {e}")
+
+    return ""
+
+
 def _get_active_token(db: Session) -> dict:
     try:
         token_record = db.query(TikTokTokenModel).first()
@@ -209,14 +236,11 @@ def _create_minimal_mp4(image_paths: list, output_path: str, duration_per_image:
     
     Creates a 9:16 vertical video (1080x1920) suitable for TikTok.
     Each image is shown for `duration_per_image` seconds.
+    Uses system ffmpeg or falls back to imageio-ffmpeg bundled binary.
     """
-    try:
-        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
-        if result.returncode != 0:
-            logger.error("ffmpeg not available")
-            return False
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        logger.error("ffmpeg not found")
+    ffmpeg_exe = _get_ffmpeg_path()
+    if not ffmpeg_exe:
+        logger.error("ffmpeg not available (system or bundled)")
         return False
 
     if not image_paths:
@@ -231,7 +255,7 @@ def _create_minimal_mp4(image_paths: list, output_path: str, duration_per_image:
             f.write(f"file '{image_paths[-1]}'\n")
 
         cmd = [
-            "ffmpeg", "-y",
+            ffmpeg_exe, "-y",
             "-f", "concat", "-safe", "0", "-i", list_path,
             "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
             "-c:v", "libx264",
@@ -753,15 +777,34 @@ def debug_image_upload(image_url: str = Query(PRODUCT_IMAGES[0]), db: Session = 
 
 @router.get("/debug-ffmpeg", summary="Check ffmpeg availability")
 def debug_ffmpeg():
-    """Check if ffmpeg is installed and working."""
+    """Check if ffmpeg is available (system or bundled via imageio-ffmpeg)."""
+    info = {"system_ffmpeg": False, "bundled_ffmpeg": False, "resolved_path": ""}
+
+    # Check system ffmpeg
     try:
         result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
-        version = result.stdout.decode()[:200] if result.returncode == 0 else "not available"
-        return {"available": result.returncode == 0, "version": version}
-    except FileNotFoundError:
-        return {"available": False, "error": "ffmpeg not found in PATH"}
-    except Exception as e:
-        return {"available": False, "error": str(e)}
+        if result.returncode == 0:
+            info["system_ffmpeg"] = True
+            info["system_version"] = result.stdout.decode()[:200]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Check bundled ffmpeg
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        result = subprocess.run([ffmpeg_exe, "-version"], capture_output=True, timeout=5)
+        if result.returncode == 0:
+            info["bundled_ffmpeg"] = True
+            info["bundled_path"] = ffmpeg_exe
+            info["bundled_version"] = result.stdout.decode()[:200]
+    except (ImportError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        info["bundled_error"] = str(e)
+
+    # Resolved path
+    info["resolved_path"] = _get_ffmpeg_path()
+    info["available"] = bool(info["resolved_path"])
+    return info
 
 
 # ── Performance Endpoints ──
