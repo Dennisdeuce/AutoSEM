@@ -20,12 +20,12 @@ async def lifespan(app: FastAPI):
     logger.info("\U0001f680 AutoSEM starting up...")
     Base.metadata.create_all(bind=engine)
     logger.info("\u2705 Database tables created")
-    logger.info("\u2705 All routers loaded (meta, tiktok, deploy)")
+    logger.info("\u2705 All routers loaded (meta, tiktok, deploy) - v0.3.2 video ads")
     yield
     logger.info("\U0001f44b AutoSEM shutting down...")
 
 
-app = FastAPI(title="AutoSEM", version="0.3.1", docs_url="/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
+app = FastAPI(title="AutoSEM", version="0.3.2", docs_url="/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -42,7 +42,7 @@ app.include_router(deploy.router, prefix="/api/v1/deploy", tags=["deploy"])
 
 @app.get("/", summary="Root")
 async def root():
-    return {"message": "Welcome to AutoSEM v0.3.1", "dashboard": "/dashboard", "tiktok_setup": "/tiktok-setup"}
+    return {"message": "Welcome to AutoSEM v0.3.2", "dashboard": "/dashboard", "tiktok_setup": "/tiktok-setup"}
 
 
 @app.get("/dashboard", summary="Dashboard", response_class=HTMLResponse)
@@ -60,7 +60,7 @@ async def dashboard_page():
 
 @app.get("/health", summary="Health Check")
 async def health_check():
-    return {"status": "healthy", "version": "0.3.1", "tiktok_router": "loaded", "deploy_router": "loaded"}
+    return {"status": "healthy", "version": "0.3.2", "tiktok_router": "loaded", "deploy_router": "loaded", "features": ["ffmpeg_video_gen", "customized_user_identity", "multi_strategy_ads"]}
 
 
 @app.get("/tiktok-setup", summary="TikTok Setup Page", response_class=HTMLResponse)
@@ -139,14 +139,21 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
             <h2>Step 2: Launch Campaign</h2>
             <div class="step">
                 <h3>Campaign Settings</h3>
-                <p>Daily Budget: $5.00 | Objective: Traffic | Target: US Tennis Enthusiasts 25-55</p>
+                <p>Daily Budget: $20.00 | Objective: Traffic | Target: US Tennis Enthusiasts 25-55</p>
+                <p style="margin-top:8px;color:#667eea"><strong>v0.3.2:</strong> Now generates video ads from product images using ffmpeg</p>
             </div>
-            <button class="btn btn-success" onclick="launchCampaign()">&#128640; Launch $5/day Campaign</button>
+            <button class="btn btn-success" onclick="launchCampaign()">&#128640; Launch Campaign</button>
             <div id="launch-result"></div>
         </div>
 
         <div class="card">
-            <h2>Debug Output</h2>
+            <h2>Debug Tools</h2>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+                <button class="btn btn-primary" onclick="testVideo()" style="font-size:0.9em;padding:10px">&#127909; Generate Test Video</button>
+                <button class="btn btn-primary" onclick="checkFfmpeg()" style="font-size:0.9em;padding:10px">&#9881; Check ffmpeg</button>
+                <button class="btn btn-primary" onclick="listIdentities()" style="font-size:0.9em;padding:10px">&#128100; List Identities</button>
+                <button class="btn btn-primary" onclick="listVideos()" style="font-size:0.9em;padding:10px">&#127910; List Videos</button>
+            </div>
             <div id="result"></div>
         </div>
     </div>
@@ -189,13 +196,16 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
 
         async function launchCampaign() {
             const el = document.getElementById('launch-result');
-            el.innerHTML = '<div class="status info">Launching campaign... This may take a moment.</div>';
+            el.innerHTML = '<div class="status info">Launching campaign with video generation... This may take 30-60 seconds.</div>';
             try {
-                const res = await fetch('/api/v1/tiktok/launch-campaign?daily_budget=5.0&campaign_name=Court+Sportswear+-+Tennis+Apparel', { method: 'POST' });
+                const res = await fetch('/api/v1/tiktok/launch-campaign?daily_budget=20.0&campaign_name=Court+Sportswear+-+Tennis+Video+Ads', { method: 'POST' });
                 const data = await res.json();
                 document.getElementById('result').textContent = JSON.stringify(data, null, 2);
                 if (data.success) {
-                    el.innerHTML = '<div class="status success">&#9989; Campaign launched! ID: ' + data.campaign_id + ' | Budget: $' + data.daily_budget + '/day</div>';
+                    let msg = '&#9989; Campaign launched! ID: ' + data.campaign_id;
+                    if (data.video_id) msg += ' | Video: ' + data.video_id;
+                    if (data.ad_strategy) msg += ' | Strategy: ' + data.ad_strategy;
+                    el.innerHTML = '<div class="status success">' + msg + '</div>';
                 } else {
                     el.innerHTML = '<div class="status error">&#10060; ' + (data.error || 'Failed') + '</div>';
                 }
@@ -204,14 +214,40 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
             }
         }
 
-        checkStatus();
-
-        const urlParams = new URLSearchParams(window.location.search);
-        const authCode = urlParams.get('auth_code');
-        if (authCode) {
-            document.getElementById('auth-code-input').value = authCode;
-            exchangeToken();
+        async function testVideo() {
+            document.getElementById('result').textContent = 'Generating video from product images...';
+            try {
+                const res = await fetch('/api/v1/tiktok/generate-video', { method: 'POST' });
+                const data = await res.json();
+                document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+            } catch(e) { document.getElementById('result').textContent = 'Error: ' + e.message; }
         }
+
+        async function checkFfmpeg() {
+            try {
+                const res = await fetch('/api/v1/tiktok/debug-ffmpeg');
+                const data = await res.json();
+                document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+            } catch(e) { document.getElementById('result').textContent = 'Error: ' + e.message; }
+        }
+
+        async function listIdentities() {
+            try {
+                const res = await fetch('/api/v1/tiktok/identities');
+                const data = await res.json();
+                document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+            } catch(e) { document.getElementById('result').textContent = 'Error: ' + e.message; }
+        }
+
+        async function listVideos() {
+            try {
+                const res = await fetch('/api/v1/tiktok/videos');
+                const data = await res.json();
+                document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+            } catch(e) { document.getElementById('result').textContent = 'Error: ' + e.message; }
+        }
+
+        checkStatus();
     </script>
 </body>
 </html>'''
@@ -287,7 +323,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
     <div class="container">
         <div class="header">
             <h1>&#128640; AutoSEM Dashboard</h1>
-            <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine</p>
+            <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine v0.3.2</p>
         </div>
         <div id="error-banner" class="error-banner"></div>
         <div class="metrics-grid" id="top-metrics">
@@ -344,7 +380,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             <h2>Recent Activity</h2>
             <div id="activity-log"><div class="loading-msg"><div class="spinner"></div> Loading activity...</div></div>
         </div>
-        <div class="footer">AutoSEM v0.3.1 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
+        <div class="footer">AutoSEM v0.3.2 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
     </div>
     <script>
         const API = '/api/v1';
