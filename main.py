@@ -14,14 +14,14 @@ from app.routers import products, campaigns, dashboard, settings, automation, me
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("AutoSEM")
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("\U0001f680 AutoSEM starting up...")
     Base.metadata.create_all(bind=engine)
     logger.info("\u2705 Database tables created")
-    logger.info(f"\u2705 All routers loaded - v{VERSION} Video-first Spark Ads (robust response parsing)")
+    logger.info(f"\u2705 All routers loaded - v{VERSION} Fix thumbnail aspect ratio + Pangle permissions")
     yield
     logger.info("\U0001f44b AutoSEM shutting down...")
 
@@ -67,8 +67,8 @@ async def dashboard_page():
 @app.get("/health", summary="Health Check")
 async def health_check():
     return {"status": "healthy", "version": VERSION, "tiktok_router": "loaded", "deploy_router": "loaded",
-            "features": ["tt_user_identity", "spark_ads_video", "md5_video_upload", "multi_strategy_ads", "pangle_fallback", "safe_data_parsing"],
-            "identity_strategy": "TT_USER Spark Ads - video-first (robust response parsing v0.8.0)"}
+            "features": ["tt_user_identity", "spark_ads_video", "auto_thumbnail", "no_thumbnail_mismatch", "pangle_no_location", "safe_data_parsing"],
+            "identity_strategy": "TT_USER Spark Ads - video-first, auto-thumbnail (v0.9.0)"}
 
 
 @app.get("/tiktok-setup", summary="TikTok Setup Page", response_class=HTMLResponse)
@@ -121,7 +121,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
     <div class="container">
         <div class="card">
             <h1>&#127919; TikTok Ads Setup</h1>
-            <p class="subtitle">Connect your TikTok Business account and launch campaigns (v0.8.0 - Robust Parsing)</p>
+            <p class="subtitle">Connect your TikTok Business account and launch campaigns (v0.9.0 - Auto Thumbnail)</p>
             <div id="status-check">Checking connection status...</div>
         </div>
 
@@ -148,7 +148,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
             <div class="step">
                 <h3>Campaign Settings</h3>
                 <p>Daily Budget: $20.00 | Objective: Traffic | Target: US Tennis Enthusiasts 25-55</p>
-                <p style="margin-top:8px;color:#667eea"><strong>v0.8.0:</strong> Video-first Spark Ads + robust response parsing</p>
+                <p style="margin-top:8px;color:#667eea"><strong>v0.9.0:</strong> Video Spark Ads with auto-generated thumbnails</p>
             </div>
             <button class="btn btn-success" onclick="launchCampaign()">&#128640; Launch Campaign</button>
             <div id="launch-result"></div>
@@ -211,11 +211,13 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
                 const res = await fetch('/api/v1/tiktok/launch-campaign?daily_budget=20.0&campaign_name=Court+Sportswear+-+Tennis+Ads', { method: 'POST' });
                 const data = await res.json();
                 document.getElementById('result').textContent = JSON.stringify(data, null, 2);
-                if (data.success) {
+                if (data.success && data.ad_id) {
                     let msg = '&#9989; Campaign launched! ID: ' + data.campaign_id;
                     if (data.ad_strategy) msg += ' | Strategy: ' + data.ad_strategy;
                     if (data.video_id) msg += ' | Video: ' + data.video_id;
                     el.innerHTML = '<div class="status success">' + msg + '</div>';
+                } else if (data.success) {
+                    el.innerHTML = '<div class="status info">&#9888; Campaign created (ID: ' + data.campaign_id + ') but ad creation had issues. Check debug output below.</div>';
                 } else {
                     el.innerHTML = '<div class="status error">&#10060; ' + (data.error || 'Failed') + '</div>';
                 }
@@ -350,7 +352,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
     <div class="container">
         <div class="header">
             <h1>&#128640; AutoSEM Dashboard</h1>
-            <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine v0.8.0</p>
+            <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine v0.9.0</p>
         </div>
         <div id="error-banner" class="error-banner"></div>
         <div class="metrics-grid" id="top-metrics">
@@ -400,7 +402,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             <h2>Recent Activity</h2>
             <div id="activity-log"><div class="loading-msg"><div class="spinner"></div> Loading activity...</div></div>
         </div>
-        <div class="footer">AutoSEM v0.8.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
+        <div class="footer">AutoSEM v0.9.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
     </div>
     <script>
         const API = '/api/v1';
