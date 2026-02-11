@@ -1,6 +1,6 @@
 """TikTok Ads router - OAuth, campaign creation, and performance tracking
 
-Ad creation strategy priority (v0.7.0 - Video-first Spark Ads):
+Ad creation strategy priority (v0.8.0 - Video-first Spark Ads):
 1. SINGLE_VIDEO + TT_USER (primary - Spark Ads with video pushed to linked account)
 2. SINGLE_VIDEO + TT_USER without CTA (CTA compatibility fallback)
 3. Pangle display ad (audience network fallback)
@@ -12,7 +12,8 @@ Identity types (as of early 2026):
 - BC_AUTH_TT: Business Center authorized accounts.
 - CUSTOMIZED_USER: DEPRECATED by TikTok as of early 2026.
 
-Video upload fix: TikTok requires video_signature (MD5 hash) for UPLOAD_BY_FILE.
+v0.8.0 fix: TikTok API returns 'data' as a list in some responses (video upload).
+Added _safe_get_data() helper for robust response parsing.
 """
 
 import os
@@ -51,6 +52,45 @@ PRODUCT_IMAGES = [
 
 
 # ── Core Helpers ──
+
+def _safe_get_data(result: dict, *keys):
+    """Safely extract nested data from TikTok API responses.
+
+    v0.8.0 fix: TikTok API inconsistently returns 'data' as either a dict or a list.
+    This handles both cases and extracts the requested key.
+
+    Usage:
+        _safe_get_data(result, "video_id")  -> str or ""
+        _safe_get_data(result, "ad_ids")    -> list or []
+        _safe_get_data(result, "image_id")  -> str or ""
+        _safe_get_data(result)              -> the data dict itself
+    """
+    raw_data = result.get("data") if isinstance(result, dict) else None
+    # Normalize: if data is a list, take first element
+    if isinstance(raw_data, list):
+        data = raw_data[0] if raw_data else {}
+    elif isinstance(raw_data, dict):
+        data = raw_data
+    else:
+        data = {}
+    if not keys:
+        return data
+    # Walk through nested keys
+    current = data
+    for i, key in enumerate(keys):
+        if isinstance(current, dict):
+            current = current.get(key)
+        elif isinstance(current, list) and current:
+            if isinstance(current[0], dict):
+                current = current[0].get(key)
+            else:
+                return [] if key.endswith("s") else ""
+        else:
+            return [] if key.endswith("s") else ""
+        if current is None:
+            return [] if key.endswith("s") else ""
+    return current
+
 
 def _get_ffmpeg_path() -> str:
     """Find ffmpeg: system PATH -> imageio-ffmpeg bundle -> empty string."""
@@ -102,7 +142,7 @@ def _tiktok_upload(endpoint: str, access_token: str, advertiser_id: str,
                    extra_data: dict = None) -> dict:
     """Upload a file to TikTok using multipart form data.
 
-    v0.7.0 fix: Computes MD5 hash and sends video_signature field,
+    v0.7.0+: Computes MD5 hash and sends video_signature field,
     which TikTok requires for UPLOAD_BY_FILE uploads.
     """
     url = f"{TIKTOK_API_BASE}{endpoint}"
@@ -111,7 +151,6 @@ def _tiktok_upload(endpoint: str, access_token: str, advertiser_id: str,
     if extra_data:
         data.update(extra_data)
     try:
-        # Read file content and compute MD5 signature
         with open(file_path, "rb") as f:
             file_content = f.read()
 
@@ -119,12 +158,11 @@ def _tiktok_upload(endpoint: str, access_token: str, advertiser_id: str,
         data["video_signature"] = md5_hash
         logger.info(f"Upload: file={os.path.basename(file_path)}, size={len(file_content)}, md5={md5_hash}")
 
-        # Send multipart with file content from memory
         files = {file_field: (os.path.basename(file_path), io.BytesIO(file_content), "video/mp4")}
         resp = requests.post(url, headers=headers, data=data, files=files, timeout=120)
         resp.raise_for_status()
         result = resp.json()
-        logger.info(f"Upload response: code={result.get('code')}, message={result.get('message')}")
+        logger.info(f"Upload response: code={result.get('code')}, message={result.get('message')}, data_type={type(result.get('data')).__name__}")
         return result
     except Exception as e:
         logger.error(f"TikTok upload error: {e}")
@@ -136,50 +174,24 @@ def _tiktok_upload(endpoint: str, access_token: str, advertiser_id: str,
 def _find_best_identity(access_token: str, advertiser_id: str) -> dict:
     """Find best identity for ad creation.
 
-    As of early 2026, TikTok has deprecated CUSTOMIZED_USER identities.
-    TT_USER is now the primary identity for Spark Ads (video-based).
-
     Priority: TT_USER > BC_AUTH_TT > CUSTOMIZED_USER (deprecated fallback)
     """
-    # Priority 1: TT_USER (primary for Spark Ads - linked TikTok account)
-    result = _tiktok_api("GET", "/identity/get/", access_token,
-                         params={"advertiser_id": advertiser_id, "identity_type": "TT_USER"})
-    if result.get("code") == 0:
-        identities = result.get("data", {}).get("identity_list", [])
-        if identities:
-            ident = identities[0]
-            logger.info(f"Using TT_USER identity: {ident.get('identity_id')} ({ident.get('display_name')}) - Spark Ads video-first")
-            return {"identity_id": ident.get("identity_id"),
-                    "identity_type": "TT_USER",
-                    "display_name": ident.get("display_name", "Court Sportswear"),
-                    "profile_image": ident.get("profile_image", "")}
-
-    # Priority 2: BC_AUTH_TT (Business Center authorized TikTok account)
-    result = _tiktok_api("GET", "/identity/get/", access_token,
-                         params={"advertiser_id": advertiser_id, "identity_type": "BC_AUTH_TT"})
-    if result.get("code") == 0:
-        identities = result.get("data", {}).get("identity_list", [])
-        if identities:
-            ident = identities[0]
-            logger.info(f"Using BC_AUTH_TT identity: {ident.get('identity_id')}")
-            return {"identity_id": ident.get("identity_id"),
-                    "identity_type": "BC_AUTH_TT",
-                    "display_name": ident.get("display_name", "Court Sportswear"),
-                    "profile_image": ident.get("profile_image", "")}
-
-    # Priority 3: CUSTOMIZED_USER (DEPRECATED - kept as last resort fallback)
-    result = _tiktok_api("GET", "/identity/get/", access_token,
-                         params={"advertiser_id": advertiser_id, "identity_type": "CUSTOMIZED_USER"})
-    if result.get("code") == 0:
-        identities = result.get("data", {}).get("identity_list", [])
-        if identities:
-            ident = identities[0]
-            logger.warning("Using CUSTOMIZED_USER identity - NOTE: deprecated by TikTok, may fail")
-            return {"identity_id": ident.get("identity_id"),
-                    "identity_type": "CUSTOMIZED_USER",
-                    "display_name": ident.get("display_name", "Court Sportswear"),
-                    "profile_image": ident.get("profile_image", "")}
-
+    for identity_type in ["TT_USER", "BC_AUTH_TT", "CUSTOMIZED_USER"]:
+        result = _tiktok_api("GET", "/identity/get/", access_token,
+                             params={"advertiser_id": advertiser_id, "identity_type": identity_type})
+        if result.get("code") == 0:
+            data = _safe_get_data(result)
+            identities = data.get("identity_list", [])
+            if identities:
+                ident = identities[0]
+                if identity_type == "CUSTOMIZED_USER":
+                    logger.warning("Using CUSTOMIZED_USER identity - NOTE: deprecated by TikTok, may fail")
+                else:
+                    logger.info(f"Using {identity_type} identity: {ident.get('identity_id')} ({ident.get('display_name')})")
+                return {"identity_id": ident.get("identity_id"),
+                        "identity_type": identity_type,
+                        "display_name": ident.get("display_name", "Court Sportswear"),
+                        "profile_image": ident.get("profile_image", "")}
     return {}
 
 
@@ -211,7 +223,7 @@ def _upload_images(access_token: str, advertiser_id: str, image_urls: list) -> l
             "file_name": f"cs_{int(time.time())}_{len(image_ids)}.jpg",
         })
         if result.get("code") == 0:
-            img_id = result.get("data", {}).get("image_id", "")
+            img_id = _safe_get_data(result, "image_id")
             if img_id:
                 image_ids.append(img_id)
         elif result.get("code") == 40911:
@@ -220,7 +232,7 @@ def _upload_images(access_token: str, advertiser_id: str, image_urls: list) -> l
                 "file_name": f"cs_u{int(time.time())}_{len(image_ids)}.jpg",
             })
             if result2.get("code") == 0:
-                img_id = result2.get("data", {}).get("image_id", "")
+                img_id = _safe_get_data(result2, "image_id")
                 if img_id:
                     image_ids.append(img_id)
     return image_ids
@@ -283,7 +295,7 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
                                 image_urls: list = None) -> dict:
     """Full pipeline: download images -> create video -> upload to TikTok.
 
-    v0.7.0: Upload now includes video_signature (MD5 hash) required by TikTok.
+    v0.8.0: Fixed response parsing - uses _safe_get_data() for robust extraction.
     """
     if not image_urls:
         image_urls = _get_product_images()[:5]
@@ -315,12 +327,22 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
             video_path, file_field="video_file",
             extra_data={"upload_type": "UPLOAD_BY_FILE",
                        "file_name": f"court_sportswear_{int(time.time())}.mp4"})
-        steps.append({"step": "upload_video", "code": result.get("code"),
+
+        # v0.8.0 fix: Use _safe_get_data to handle data being a list or dict
+        upload_video_id = _safe_get_data(result, "video_id")
+        raw_data_type = type(result.get("data")).__name__
+
+        steps.append({"step": "upload_video",
+                      "code": result.get("code"),
                       "message": result.get("message"),
-                      "video_id": result.get("data", {}).get("video_id", "") if result.get("code") == 0 else ""})
-        if result.get("code") == 0:
-            video_id = result.get("data", {}).get("video_id", "")
+                      "video_id": upload_video_id,
+                      "raw_data_type": raw_data_type})
+
+        if result.get("code") == 0 and upload_video_id:
+            video_id = upload_video_id
             logger.info(f"Video uploaded successfully: {video_id}")
+        else:
+            logger.warning(f"Video upload returned code={result.get('code')}, data_type={raw_data_type}, video_id={upload_video_id}")
     except Exception as e:
         steps.append({"step": "upload_video", "error": str(e)})
 
@@ -339,9 +361,7 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
                    campaign_id: str = "") -> dict:
     """Try multiple ad creation strategies in priority order.
 
-    v0.7.0: Video-first strategy for Spark Ads.
-    TT_USER identity = Spark Ads = requires VIDEO content.
-    SINGLE_IMAGE + TT_USER will always fail ("source of this post is invalid").
+    v0.8.0: Uses _safe_get_data() for robust response parsing.
 
     Strategy 1: SINGLE_VIDEO + TT_USER (Spark Ads - push new video to linked account)
     Strategy 2: SINGLE_VIDEO + TT_USER without CTA (CTA compatibility fallback)
@@ -369,11 +389,13 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
         result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
             "creatives": [creative], "operation_status": "ENABLE"})
+        ad_ids = _safe_get_data(result, "ad_ids")
         attempts.append({"strategy": "video_tt_user", "code": result.get("code"),
-                        "message": result.get("message"), "data": result.get("data"),
+                        "message": result.get("message"),
+                        "ad_ids": ad_ids,
                         "identity_type_used": identity_type})
-        if result.get("code") == 0:
-            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
+        if result.get("code") == 0 and ad_ids:
+            return {"success": True, "ad_ids": ad_ids,
                     "strategy": "video_tt_user", "attempts": attempts}
 
     # ── Strategy 2: SINGLE_VIDEO + TT_USER without CTA ──
@@ -392,11 +414,13 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
         result = _tiktok_api("POST", "/ad/create/", access_token, data={
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
             "creatives": [creative], "operation_status": "ENABLE"})
+        ad_ids = _safe_get_data(result, "ad_ids")
         attempts.append({"strategy": "video_tt_user_no_cta", "code": result.get("code"),
-                        "message": result.get("message"), "data": result.get("data"),
+                        "message": result.get("message"),
+                        "ad_ids": ad_ids,
                         "identity_type_used": identity_type})
-        if result.get("code") == 0:
-            return {"success": True, "ad_ids": result.get("data", {}).get("ad_ids", []),
+        if result.get("code") == 0 and ad_ids:
+            return {"success": True, "ad_ids": ad_ids,
                     "strategy": "video_tt_user_no_cta", "attempts": attempts}
 
     # ── Strategy 3: Pangle display network (supports images, no TT_USER required) ──
@@ -417,10 +441,10 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "gender": "GENDER_UNLIMITED",
             "age_groups": ["AGE_25_34", "AGE_35_44", "AGE_45_54"],
         })
+        pangle_ag_id = _safe_get_data(ag_result, "adgroup_id")
         attempts.append({"strategy": "create_pangle_adgroup", "code": ag_result.get("code"),
-                         "message": ag_result.get("message")})
-        if ag_result.get("code") == 0:
-            pangle_ag_id = ag_result.get("data", {}).get("adgroup_id")
+                         "message": ag_result.get("message"), "adgroup_id": pangle_ag_id})
+        if ag_result.get("code") == 0 and pangle_ag_id:
             creative = {
                 "ad_name": f"Court Sportswear - Pangle Image {int(time.time()) % 10000}",
                 "ad_text": "Premium tennis & pickleball apparel. Shop now!",
@@ -434,14 +458,15 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             ad_result = _tiktok_api("POST", "/ad/create/", access_token, data={
                 "advertiser_id": advertiser_id, "adgroup_id": pangle_ag_id,
                 "creatives": [creative], "operation_status": "ENABLE"})
+            ad_ids = _safe_get_data(ad_result, "ad_ids")
             attempts.append({"strategy": "pangle_image_ad", "code": ad_result.get("code"),
-                             "message": ad_result.get("message"), "adgroup_id": pangle_ag_id})
-            if ad_result.get("code") == 0:
-                return {"success": True, "ad_ids": ad_result.get("data", {}).get("ad_ids", []),
+                             "message": ad_result.get("message"), "adgroup_id": pangle_ag_id,
+                             "ad_ids": ad_ids})
+            if ad_result.get("code") == 0 and ad_ids:
+                return {"success": True, "ad_ids": ad_ids,
                         "pangle_adgroup_id": pangle_ag_id, "strategy": "pangle_image",
                         "attempts": attempts}
 
-    # If no video and no strategies worked, provide clear error
     if not video_id:
         attempts.append({"strategy": "info", "message": "No video_id available. TT_USER Spark Ads require video content. Check ffmpeg availability."})
 
@@ -490,7 +515,7 @@ def _exchange_token(auth_code: str, db: Session) -> dict:
         result = resp.json()
         if result.get("code") != 0:
             return {"success": False, "error": result.get("message")}
-        data = result.get("data", {})
+        data = _safe_get_data(result)
         access_token = data.get("access_token")
         advertiser_ids = data.get("advertiser_ids", [])
         advertiser_id = advertiser_ids[0] if advertiser_ids else ""
@@ -520,7 +545,7 @@ def check_tiktok_status(db: Session = Depends(get_db)):
                         params={"app_id": TIKTOK_APP_ID, "secret": TIKTOK_APP_SECRET})
     if result.get("code") == 0:
         return {"connected": True, "advertiser_id": creds["advertiser_id"],
-                "advertisers": result.get("data", {}).get("list", [])}
+                "advertisers": _safe_get_data(result).get("list", [])}
     return {"connected": False, "message": result.get("message")}
 
 
@@ -547,7 +572,9 @@ def launch_campaign(daily_budget: float = Query(20.0),
         steps.append({"step": "campaign", "code": camp.get("code"), "message": camp.get("message")})
         if camp.get("code") != 0:
             return {"success": False, "error": camp.get("message"), "steps": steps}
-        campaign_id = camp["data"]["campaign_id"]
+        campaign_id = _safe_get_data(camp, "campaign_id")
+        if not campaign_id:
+            return {"success": False, "error": "No campaign_id in response", "steps": steps}
 
         # Step 2: Create ad group
         schedule = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
@@ -564,7 +591,9 @@ def launch_campaign(daily_budget: float = Query(20.0),
         steps.append({"step": "adgroup", "code": ag.get("code"), "message": ag.get("message")})
         if ag.get("code") != 0:
             return {"success": False, "error": ag.get("message"), "steps": steps, "campaign_id": campaign_id}
-        adgroup_id = ag["data"]["adgroup_id"]
+        adgroup_id = _safe_get_data(ag, "adgroup_id")
+        if not adgroup_id:
+            return {"success": False, "error": "No adgroup_id in response", "steps": steps, "campaign_id": campaign_id}
 
         # Step 3: Upload product images (for thumbnails)
         product_urls = _get_product_images()[:5]
@@ -614,34 +643,26 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
                           campaign_id: str = Query("1856672017238274"),
                           image_url: str = Query(None),
                           db: Session = Depends(get_db)):
-    """Create an ad for an existing ad group.
-
-    v0.7.0: Video-first Spark Ads strategy.
-    TT_USER identity requires video content - images alone will fail.
-    """
+    """Create an ad for an existing ad group. v0.8.0: Fixed response parsing."""
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"success": False, "error": "TikTok not connected"}
     access_token, advertiser_id = creds["access_token"], creds["advertiser_id"]
     steps = []
 
-    # Upload images (for thumbnails)
     image_urls = [image_url] if image_url else _get_product_images()[:5]
     image_ids = _upload_images(access_token, advertiser_id, image_urls)
     steps.append({"step": "images", "count": len(image_ids), "ids": image_ids})
 
-    # Generate and upload video (REQUIRED for TT_USER Spark Ads)
     video_result = _generate_and_upload_video(access_token, advertiser_id, image_urls)
     video_id = video_result.get("video_id", "")
     steps.append({"step": "video", "video_id": video_id, "details": video_result.get("steps", [])})
 
-    # Identity (TT_USER for Spark Ads)
     identity = _find_best_identity(access_token, advertiser_id)
     steps.append({"step": "identity", "result": identity})
     if not identity.get("identity_id"):
         return {"success": False, "error": "No identity found. Link a TikTok account in TikTok Ads Manager.", "steps": steps}
 
-    # Try ad creation strategies (video-first)
     image_id = image_ids[0] if image_ids else ""
     ad_result = _try_create_ad(access_token, advertiser_id, adgroup_id,
                                 image_id, identity, video_id, campaign_id)
@@ -673,7 +694,8 @@ def upload_video_from_url(video_url: str = Query(...), db: Session = Depends(get
     result = _tiktok_api("POST", "/file/video/ad/upload/", creds["access_token"], data={
         "advertiser_id": creds["advertiser_id"], "upload_type": "UPLOAD_BY_URL",
         "video_url": video_url, "file_name": f"court_sportswear_{int(time.time())}.mp4"})
-    return {"result": result, "video_id": result.get("data", {}).get("video_id", "") if result.get("code") == 0 else ""}
+    video_id = _safe_get_data(result, "video_id") if result.get("code") == 0 else ""
+    return {"result": result, "video_id": video_id}
 
 
 # ── Debug & Info Endpoints ──
@@ -685,7 +707,8 @@ def list_images(db: Session = Depends(get_db)):
         return {"error": "Not connected"}
     result = _tiktok_api("GET", "/file/image/ad/get/", creds["access_token"],
                          params={"advertiser_id": creds["advertiser_id"], "page_size": 50})
-    images = result.get("data", {}).get("list", []) if result.get("code") == 0 else []
+    data = _safe_get_data(result)
+    images = data.get("list", [])
     return {"count": len(images), "images": images,
             "raw_code": result.get("code"), "raw_message": result.get("message")}
 
@@ -695,11 +718,20 @@ def list_videos(db: Session = Depends(get_db)):
     creds = _get_active_token(db)
     if not creds["access_token"]:
         return {"error": "Not connected"}
-    result = _tiktok_api("GET", "/file/video/ad/get/", creds["access_token"],
-                         params={"advertiser_id": creds["advertiser_id"], "page_size": 50})
-    videos = result.get("data", {}).get("list", []) if result.get("code") == 0 else []
-    return {"count": len(videos), "videos": videos,
-            "raw_code": result.get("code"), "raw_message": result.get("message")}
+    # Try multiple endpoint paths - TikTok API video listing
+    for endpoint in ["/file/video/ad/info/", "/file/video/ad/get/", "/creative/video/get/"]:
+        result = _tiktok_api("GET", endpoint, creds["access_token"],
+                             params={"advertiser_id": creds["advertiser_id"], "page_size": 50})
+        if result.get("code") == 0:
+            data = _safe_get_data(result)
+            videos = data.get("list", [])
+            return {"count": len(videos), "videos": videos,
+                    "endpoint_used": endpoint,
+                    "raw_code": result.get("code"), "raw_message": result.get("message")}
+    # If all fail, return the last error
+    return {"count": 0, "videos": [],
+            "raw_code": result.get("code"), "raw_message": result.get("message"),
+            "note": "Video listing endpoints returned errors - videos may still be accessible via ad creation"}
 
 
 @router.get("/identities", summary="List all TikTok identities")
@@ -711,7 +743,8 @@ def list_identities(db: Session = Depends(get_db)):
     for it in ["TT_USER", "BC_AUTH_TT", "CUSTOMIZED_USER"]:
         result = _tiktok_api("GET", "/identity/get/", creds["access_token"],
                              params={"advertiser_id": creds["advertiser_id"], "identity_type": it})
-        lst = result.get("data", {}).get("identity_list", []) if result.get("code") == 0 else []
+        data = _safe_get_data(result)
+        lst = data.get("identity_list", []) if result.get("code") == 0 else []
         all_ids[it] = {"count": len(lst), "list": lst}
     return {"advertiser_id": creds["advertiser_id"], "identities": all_ids}
 
@@ -723,7 +756,9 @@ def debug_image_upload(image_url: str = Query(PRODUCT_IMAGES[0]), db: Session = 
         return {"error": "Not connected"}
     result = _tiktok_api("POST", "/file/image/ad/upload/", creds["access_token"], data={
         "advertiser_id": creds["advertiser_id"], "upload_type": "UPLOAD_BY_URL", "image_url": image_url})
-    return {"image_url": image_url, "result": result}
+    return {"image_url": image_url, "result": result,
+            "data_type": type(result.get("data")).__name__,
+            "extracted_image_id": _safe_get_data(result, "image_id")}
 
 
 @router.get("/debug-ffmpeg", summary="Check ffmpeg availability")
@@ -748,6 +783,57 @@ def debug_ffmpeg():
     info["resolved_path"] = _get_ffmpeg_path()
     info["available"] = bool(info["resolved_path"])
     return info
+
+
+@router.get("/debug-raw-upload", summary="Test video upload and show raw response")
+def debug_raw_upload(db: Session = Depends(get_db)):
+    """Debug endpoint: Generate video, upload it, and return the RAW TikTok response.
+    This helps diagnose response format issues (list vs dict)."""
+    creds = _get_active_token(db)
+    if not creds["access_token"]:
+        return {"error": "Not connected"}
+    access_token, advertiser_id = creds["access_token"], creds["advertiser_id"]
+
+    # Download 2 images and make a short video
+    image_urls = _get_product_images()[:2]
+    image_paths = _download_images_for_video(image_urls)
+    if not image_paths:
+        return {"error": "No images downloaded"}
+
+    video_path = tempfile.mktemp(suffix=".mp4")
+    success = _create_minimal_mp4(image_paths, video_path, duration_per_image=2)
+    for p in image_paths:
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+
+    if not success:
+        return {"error": "Video creation failed", "ffmpeg_available": bool(_get_ffmpeg_path())}
+
+    file_size = os.path.getsize(video_path)
+
+    # Upload and capture RAW response
+    raw_result = _tiktok_upload(
+        "/file/video/ad/upload/", access_token, advertiser_id,
+        video_path, file_field="video_file",
+        extra_data={"upload_type": "UPLOAD_BY_FILE",
+                   "file_name": f"debug_{int(time.time())}.mp4"})
+
+    try:
+        os.remove(video_path)
+    except Exception:
+        pass
+
+    return {
+        "file_size": file_size,
+        "raw_response": raw_result,
+        "response_code": raw_result.get("code"),
+        "response_message": raw_result.get("message"),
+        "data_field_type": type(raw_result.get("data")).__name__,
+        "data_field_value": raw_result.get("data"),
+        "extracted_video_id": _safe_get_data(raw_result, "video_id"),
+    }
 
 
 @router.get("/debug-slideshow", summary="Test slideshow creation")
@@ -780,7 +866,8 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
                            params={"advertiser_id": creds["advertiser_id"], "page_size": 100})
         campaigns = []
         if result.get("code") == 0:
-            for c in result.get("data", {}).get("list", []):
+            data = _safe_get_data(result)
+            for c in data.get("list", []):
                 campaigns.append({"id": c.get("campaign_id"), "name": c.get("campaign_name"),
                                   "status": c.get("operation_status"), "budget": c.get("budget", 0),
                                   "objective": c.get("objective_type")})
@@ -793,7 +880,8 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
             "start_date": start, "end_date": end,
             "metrics": json.dumps(["spend", "impressions", "clicks", "ctr", "cpc", "reach"])})
         if stats.get("code") == 0:
-            for row in stats.get("data", {}).get("list", []):
+            stats_data = _safe_get_data(stats)
+            for row in stats_data.get("list", []):
                 m = row.get("metrics", {})
                 total_spend += float(m.get("spend", 0))
                 total_imp += int(m.get("impressions", 0))
