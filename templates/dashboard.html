@@ -76,6 +76,7 @@
         .platform-chip { font-size: 0.68em; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
         .chip-meta { background: #e7f0fd; color: #1877f2; }
         .chip-tiktok { background: #e0f7f5; color: #00897b; }
+        .muted-row td { opacity: 0.5; }
     </style>
 </head>
 <body>
@@ -152,7 +153,7 @@
             </div>
         </div>
 
-        <div class="footer">AutoSEM v1.1.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
+        <div class="footer">AutoSEM v1.2.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
     </div>
 
     <script>
@@ -296,10 +297,17 @@
                     </div>`;
 
                     if (camps.length > 0) {
-                        html += `<table class="campaign-table"><thead><tr><th>Campaign</th><th>Status</th><th>Budget/Day</th><th>Objective</th></tr></thead><tbody>`;
+                        html += `<table class="campaign-table"><thead><tr><th>Campaign</th><th>Status</th><th>Spend</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>CPC</th></tr></thead><tbody>`;
                         camps.forEach(c => {
                             const st = c.status || c.operation_status || '--';
-                            html += `<tr><td>${c.name || c.campaign_name || '--'}</td><td><span class="status status-${st}">${st}</span></td><td>$${(c.budget || 0)}</td><td>${c.objective || c.objective_type || '--'}</td></tr>`;
+                            const spend = c.spend || 0;
+                            const impressions = c.impressions || 0;
+                            const clicks = c.clicks || 0;
+                            const ctr = c.ctr || 0;
+                            const cpc = c.cpc || 0;
+                            const hasMetrics = spend > 0 || impressions > 0;
+                            const rowClass = hasMetrics ? '' : 'muted-row';
+                            html += `<tr class="${rowClass}"><td>${c.name || '--'}</td><td><span class="status status-${st}">${st}</span></td><td>$${spend.toFixed(2)}</td><td>${impressions.toLocaleString()}</td><td>${clicks}</td><td>${ctr.toFixed(2)}%</td><td>$${cpc.toFixed(2)}</td></tr>`;
                         });
                         html += `</tbody></table>`;
                     } else {
