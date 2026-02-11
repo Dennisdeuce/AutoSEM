@@ -1,5 +1,6 @@
 """TikTok Ads router - OAuth, campaign creation, and performance tracking
 
+v1.1.0 - Fix: /performance endpoint returns per-campaign metrics (spend, impressions, clicks, ctr, cpc)
 v1.0.2 - Fix: Add timestamp to campaign name to prevent "name already exists" error
 v1.0.1 - Fix: Use video_cover_url from upload response for thumbnail
          Multipart image file upload returns empty image_id.
@@ -920,42 +921,104 @@ def debug_thumbnail(db: Session = Depends(get_db)):
 
 # ── Performance Endpoints ──
 
-@router.get("/performance", summary="Get TikTok Performance Data")
+@router.get("/performance", summary="Get TikTok Performance Data (with per-campaign metrics)")
 def get_tiktok_performance(db: Session = Depends(get_db)):
+    """Fetch TikTok campaign list AND per-campaign performance metrics.
+
+    v1.1.0: Joins campaign metadata with reporting API data so each campaign
+    includes spend, impressions, clicks, CTR, and CPC - matching Meta's format.
+    """
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"error": "TikTok not connected"}
     try:
+        # Step 1: Get all campaigns
         result = _tiktok_api("GET", "/campaign/get/", creds["access_token"],
                            params={"advertiser_id": creds["advertiser_id"], "page_size": 100})
-        campaigns = []
+        campaigns_raw = []
         if result.get("code") == 0:
             data = _safe_get_data(result)
-            for c in data.get("list", []):
-                campaigns.append({"id": c.get("campaign_id"), "name": c.get("campaign_name"),
-                                  "status": c.get("operation_status"), "budget": c.get("budget", 0),
-                                  "objective": c.get("objective_type")})
+            campaigns_raw = data.get("list", [])
+
+        # Step 2: Get per-campaign performance metrics from reporting API
         end = datetime.utcnow().strftime("%Y-%m-%d")
         start = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
-        total_spend = total_imp = total_clicks = 0
+        campaign_metrics = {}  # campaign_id -> {spend, impressions, clicks, ctr, cpc}
+
         stats = _tiktok_api("GET", "/report/integrated/get/", creds["access_token"], params={
             "advertiser_id": creds["advertiser_id"], "report_type": "BASIC",
             "dimensions": json.dumps(["campaign_id"]), "data_level": "AUCTION_CAMPAIGN",
             "start_date": start, "end_date": end,
             "metrics": json.dumps(["spend", "impressions", "clicks", "ctr", "cpc", "reach"])})
+
         if stats.get("code") == 0:
             stats_data = _safe_get_data(stats)
             for row in stats_data.get("list", []):
+                dims = row.get("dimensions", {})
                 m = row.get("metrics", {})
-                total_spend += float(m.get("spend", 0))
-                total_imp += int(m.get("impressions", 0))
-                total_clicks += int(m.get("clicks", 0))
-        return {"summary": {"total_campaigns": len(campaigns), "total_spend": round(total_spend, 2),
-                            "total_impressions": total_imp, "total_clicks": total_clicks,
-                            "avg_ctr": round((total_clicks / total_imp * 100) if total_imp else 0, 2),
-                            "avg_cpc": round((total_spend / total_clicks) if total_clicks else 0, 2)},
-                "campaigns": campaigns}
+                cid = str(dims.get("campaign_id", ""))
+                if cid:
+                    campaign_metrics[cid] = {
+                        "spend": round(float(m.get("spend", 0)), 2),
+                        "impressions": int(m.get("impressions", 0)),
+                        "clicks": int(m.get("clicks", 0)),
+                        "ctr": round(float(m.get("ctr", 0)) * 100, 2),
+                        "cpc": round(float(m.get("cpc", 0)), 2),
+                        "reach": int(m.get("reach", 0)),
+                    }
+
+        # Step 3: Build enriched campaign list with metrics joined in
+        total_spend = total_imp = total_clicks = total_reach = 0
+        campaigns = []
+        for c in campaigns_raw:
+            cid = str(c.get("campaign_id", ""))
+            metrics = campaign_metrics.get(cid, {})
+            spend = metrics.get("spend", 0)
+            impressions = metrics.get("impressions", 0)
+            clicks = metrics.get("clicks", 0)
+            ctr = metrics.get("ctr", 0)
+            cpc = metrics.get("cpc", 0)
+            reach = metrics.get("reach", 0)
+
+            total_spend += spend
+            total_imp += impressions
+            total_clicks += clicks
+            total_reach += reach
+
+            campaigns.append({
+                "id": cid,
+                "name": c.get("campaign_name", ""),
+                "status": c.get("operation_status", ""),
+                "objective": c.get("objective_type", ""),
+                "budget": c.get("budget", 0),
+                "spend": spend,
+                "impressions": impressions,
+                "clicks": clicks,
+                "ctr": ctr,
+                "cpc": cpc,
+                "reach": reach,
+            })
+
+        # Sort: campaigns with spend first, then by spend descending
+        campaigns.sort(key=lambda x: x["spend"], reverse=True)
+
+        avg_ctr = round((total_clicks / total_imp * 100) if total_imp else 0, 2)
+        avg_cpc = round((total_spend / total_clicks) if total_clicks else 0, 2)
+
+        return {
+            "summary": {
+                "total_campaigns": len(campaigns),
+                "total_spend": round(total_spend, 2),
+                "total_impressions": total_imp,
+                "total_clicks": total_clicks,
+                "total_reach": total_reach,
+                "avg_ctr": avg_ctr,
+                "avg_cpc": avg_cpc,
+            },
+            "campaigns": campaigns,
+        }
     except Exception as e:
+        logger.error(f"TikTok performance error: {e}")
         return {"error": str(e)}
 
 
