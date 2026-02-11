@@ -14,14 +14,14 @@ from app.routers import products, campaigns, dashboard, settings, automation, me
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("AutoSEM")
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("\U0001f680 AutoSEM starting up...")
     Base.metadata.create_all(bind=engine)
     logger.info("\u2705 Database tables created")
-    logger.info(f"\u2705 All routers loaded - v{VERSION} Video-first Spark Ads (MD5 upload fix)")
+    logger.info(f"\u2705 All routers loaded - v{VERSION} Video-first Spark Ads (robust response parsing)")
     yield
     logger.info("\U0001f44b AutoSEM shutting down...")
 
@@ -67,8 +67,8 @@ async def dashboard_page():
 @app.get("/health", summary="Health Check")
 async def health_check():
     return {"status": "healthy", "version": VERSION, "tiktok_router": "loaded", "deploy_router": "loaded",
-            "features": ["tt_user_identity", "spark_ads_video", "md5_video_upload", "multi_strategy_ads", "pangle_fallback"],
-            "identity_strategy": "TT_USER Spark Ads - video-first (CUSTOMIZED_USER deprecated by TikTok)"}
+            "features": ["tt_user_identity", "spark_ads_video", "md5_video_upload", "multi_strategy_ads", "pangle_fallback", "safe_data_parsing"],
+            "identity_strategy": "TT_USER Spark Ads - video-first (robust response parsing v0.8.0)"}
 
 
 @app.get("/tiktok-setup", summary="TikTok Setup Page", response_class=HTMLResponse)
@@ -121,7 +121,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
     <div class="container">
         <div class="card">
             <h1>&#127919; TikTok Ads Setup</h1>
-            <p class="subtitle">Connect your TikTok Business account and launch campaigns (v0.7.0 - Video Spark Ads)</p>
+            <p class="subtitle">Connect your TikTok Business account and launch campaigns (v0.8.0 - Robust Parsing)</p>
             <div id="status-check">Checking connection status...</div>
         </div>
 
@@ -148,7 +148,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
             <div class="step">
                 <h3>Campaign Settings</h3>
                 <p>Daily Budget: $20.00 | Objective: Traffic | Target: US Tennis Enthusiasts 25-55</p>
-                <p style="margin-top:8px;color:#667eea"><strong>v0.7.0:</strong> Video-first Spark Ads with TT_USER identity + MD5 upload fix</p>
+                <p style="margin-top:8px;color:#667eea"><strong>v0.8.0:</strong> Video-first Spark Ads + robust response parsing</p>
             </div>
             <button class="btn btn-success" onclick="launchCampaign()">&#128640; Launch Campaign</button>
             <div id="launch-result"></div>
@@ -158,9 +158,11 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
             <h2>Debug Tools</h2>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
                 <button class="btn btn-primary" onclick="testVideo()" style="font-size:0.9em;padding:10px">&#127909; Generate Test Video</button>
+                <button class="btn btn-primary" onclick="testRawUpload()" style="font-size:0.9em;padding:10px">&#128269; Raw Upload Debug</button>
                 <button class="btn btn-primary" onclick="checkFfmpeg()" style="font-size:0.9em;padding:10px">&#9881; Check ffmpeg</button>
                 <button class="btn btn-primary" onclick="listIdentities()" style="font-size:0.9em;padding:10px">&#128100; List Identities</button>
                 <button class="btn btn-primary" onclick="listVideos()" style="font-size:0.9em;padding:10px">&#127910; List Videos</button>
+                <button class="btn btn-primary" onclick="listImages()" style="font-size:0.9em;padding:10px">&#128247; List Images</button>
             </div>
             <div id="result"></div>
         </div>
@@ -212,6 +214,7 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
                 if (data.success) {
                     let msg = '&#9989; Campaign launched! ID: ' + data.campaign_id;
                     if (data.ad_strategy) msg += ' | Strategy: ' + data.ad_strategy;
+                    if (data.video_id) msg += ' | Video: ' + data.video_id;
                     el.innerHTML = '<div class="status success">' + msg + '</div>';
                 } else {
                     el.innerHTML = '<div class="status error">&#10060; ' + (data.error || 'Failed') + '</div>';
@@ -225,6 +228,15 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
             document.getElementById('result').textContent = 'Generating video from product images...';
             try {
                 const res = await fetch('/api/v1/tiktok/generate-video', { method: 'POST' });
+                const data = await res.json();
+                document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+            } catch(e) { document.getElementById('result').textContent = 'Error: ' + e.message; }
+        }
+
+        async function testRawUpload() {
+            document.getElementById('result').textContent = 'Testing raw video upload (debug mode)...';
+            try {
+                const res = await fetch('/api/v1/tiktok/debug-raw-upload');
                 const data = await res.json();
                 document.getElementById('result').textContent = JSON.stringify(data, null, 2);
             } catch(e) { document.getElementById('result').textContent = 'Error: ' + e.message; }
@@ -249,6 +261,14 @@ TIKTOK_SETUP_HTML = r'''<!DOCTYPE html>
         async function listVideos() {
             try {
                 const res = await fetch('/api/v1/tiktok/videos');
+                const data = await res.json();
+                document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+            } catch(e) { document.getElementById('result').textContent = 'Error: ' + e.message; }
+        }
+
+        async function listImages() {
+            try {
+                const res = await fetch('/api/v1/tiktok/images');
                 const data = await res.json();
                 document.getElementById('result').textContent = JSON.stringify(data, null, 2);
             } catch(e) { document.getElementById('result').textContent = 'Error: ' + e.message; }
@@ -330,7 +350,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
     <div class="container">
         <div class="header">
             <h1>&#128640; AutoSEM Dashboard</h1>
-            <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine v0.7.0</p>
+            <p>Court Sportswear &mdash; Autonomous E-Commerce Advertising Engine v0.8.0</p>
         </div>
         <div id="error-banner" class="error-banner"></div>
         <div class="metrics-grid" id="top-metrics">
@@ -355,8 +375,6 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
                 </div>
             </div>
         </div>
-
-        <!-- Meta Ads Section -->
         <div class="channel-section">
             <div class="channel-header meta-header">
                 <h2>&#128308; Meta Ads <span class="badge meta-badge" id="meta-status-badge">Loading...</span></h2>
@@ -364,8 +382,6 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             </div>
             <div class="channel-body" id="meta-body"><div class="loading-msg"><div class="spinner"></div> Loading Meta data...</div></div>
         </div>
-
-        <!-- TikTok Ads Section -->
         <div class="channel-section">
             <div class="channel-header tiktok-header">
                 <h2>&#127925; TikTok Ads <span class="badge tiktok-badge" id="tiktok-status-badge">Loading...</span></h2>
@@ -373,8 +389,6 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             </div>
             <div class="channel-body" id="tiktok-body"><div class="loading-msg"><div class="spinner"></div> Loading TikTok data...</div></div>
         </div>
-
-        <!-- Google Ads Section -->
         <div class="channel-section">
             <div class="channel-header google-header">
                 <h2>&#128309; Google Ads <span class="badge google-badge" id="google-status-badge">Loading...</span></h2>
@@ -382,125 +396,21 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             </div>
             <div class="channel-body" id="google-body"><div class="loading-msg"><div class="spinner"></div> Loading Google Ads data...</div></div>
         </div>
-
         <div class="activity-section">
             <h2>Recent Activity</h2>
             <div id="activity-log"><div class="loading-msg"><div class="spinner"></div> Loading activity...</div></div>
         </div>
-        <div class="footer">AutoSEM v0.7.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
+        <div class="footer">AutoSEM v0.8.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
     </div>
     <script>
         const API = '/api/v1';
         function showError(msg) { const b = document.getElementById('error-banner'); b.textContent = msg; b.style.display = 'block'; setTimeout(() => b.style.display = 'none', 15000); }
         function hideError() { document.getElementById('error-banner').style.display = 'none'; }
-
-        async function loadDashboardStatus() {
-            try {
-                const res = await fetch(API + '/dashboard/status');
-                if (!res.ok) throw new Error('HTTP ' + res.status);
-                const d = await res.json();
-                hideError();
-                const grid = document.getElementById('top-metrics');
-                const roas = d.roas_today || 0;
-                const roasClass = roas >= 2 ? 'positive' : roas >= 1 ? 'warning' : 'negative';
-                grid.innerHTML = '<div class="metric-card"><div class="metric-value neutral">$' + (d.spend_today||0).toFixed(2) + '</div><div class="metric-label">Today Spend</div></div>' +
-                    '<div class="metric-card"><div class="metric-value positive">$' + (d.revenue_today||0).toFixed(2) + '</div><div class="metric-label">Today Revenue</div></div>' +
-                    '<div class="metric-card"><div class="metric-value ' + roasClass + '">' + roas.toFixed(1) + 'x</div><div class="metric-label">Today ROAS</div></div>' +
-                    '<div class="metric-card"><div class="metric-value neutral">' + (d.orders_today||0) + '</div><div class="metric-label">Today Orders</div></div>';
-                document.getElementById('status-dot').className = 'status-dot ' + (d.status === 'operational' ? 'ok' : 'warn');
-                document.getElementById('system-status').textContent = d.status || 'Unknown';
-                document.getElementById('last-opt').textContent = 'Last optimization: ' + (d.last_optimization || '--');
-                document.getElementById('actions-today').textContent = 'Actions today: ' + (d.actions_today || 0);
-            } catch(e) { showError('Failed to load dashboard: ' + e.message); }
-        }
-
-        async function loadMetaPerformance() {
-            const body = document.getElementById('meta-body');
-            const badge = document.getElementById('meta-status-badge');
-            try {
-                const statusRes = await fetch(API + '/meta/status');
-                const status = await statusRes.json();
-                badge.textContent = status.connected ? 'Connected' : 'Disconnected';
-                if (!status.connected) { badge.style.background = '#fee2e2'; badge.style.color = '#991b1b'; }
-                const perfRes = await fetch(API + '/dashboard/meta-performance');
-                const perf = await perfRes.json();
-                if (perf.error) { body.innerHTML = '<div class="no-data">' + perf.error + '</div>'; return; }
-                const s = perf.summary || {};
-                body.innerHTML = '<div class="channel-metrics">' +
-                    '<div class="ch-metric"><div class="val">' + (s.total_campaigns||0) + '</div><div class="lbl">Campaigns</div></div>' +
-                    '<div class="ch-metric"><div class="val">$' + (s.total_spend||0).toFixed(2) + '</div><div class="lbl">Spend (7d)</div></div>' +
-                    '<div class="ch-metric"><div class="val">' + (s.total_impressions||0).toLocaleString() + '</div><div class="lbl">Impressions</div></div>' +
-                    '<div class="ch-metric"><div class="val">' + (s.total_clicks||0).toLocaleString() + '</div><div class="lbl">Clicks</div></div>' +
-                    '<div class="ch-metric"><div class="val">' + (s.avg_ctr||0) + '%</div><div class="lbl">CTR</div></div>' +
-                    '<div class="ch-metric"><div class="val">$' + (s.avg_cpc||0).toFixed(2) + '</div><div class="lbl">Avg CPC</div></div></div>';
-            } catch(e) { body.innerHTML = '<div class="no-data">Failed: ' + e.message + '</div>'; }
-        }
-
-        async function loadTikTokPerformance() {
-            const body = document.getElementById('tiktok-body');
-            const badge = document.getElementById('tiktok-status-badge');
-            try {
-                const statusRes = await fetch(API + '/tiktok/status');
-                const status = await statusRes.json();
-                if (status.connected) {
-                    badge.textContent = 'Connected';
-                    const perfRes = await fetch(API + '/tiktok/performance');
-                    const perf = await perfRes.json();
-                    if (perf.error) { body.innerHTML = '<div class="no-data">' + perf.error + '</div>'; return; }
-                    const s = perf.summary || {};
-                    const camps = perf.campaigns || [];
-                    let html = '<div class="channel-metrics">' +
-                        '<div class="ch-metric"><div class="val">' + (s.total_campaigns||0) + '</div><div class="lbl">Campaigns</div></div>' +
-                        '<div class="ch-metric"><div class="val">$' + (s.total_spend||0).toFixed(2) + '</div><div class="lbl">Spend (7d)</div></div>' +
-                        '<div class="ch-metric"><div class="val">' + (s.total_impressions||0).toLocaleString() + '</div><div class="lbl">Impressions</div></div>' +
-                        '<div class="ch-metric"><div class="val">' + (s.total_clicks||0).toLocaleString() + '</div><div class="lbl">Clicks</div></div>' +
-                        '<div class="ch-metric"><div class="val">' + (s.avg_ctr||0) + '%</div><div class="lbl">CTR</div></div>' +
-                        '<div class="ch-metric"><div class="val">$' + (s.avg_cpc||0).toFixed(2) + '</div><div class="lbl">Avg CPC</div></div></div>';
-                    if (camps.length > 0) {
-                        html += '<table class="campaign-table"><thead><tr><th>Campaign</th><th>Status</th><th>Budget</th><th>Objective</th></tr></thead><tbody>';
-                        camps.forEach(c => { html += '<tr><td>' + (c.name||'--') + '</td><td><span class="status-' + (c.status||'') + '">' + (c.status||'--') + '</span></td><td>$' + (c.budget||0) + '</td><td>' + (c.objective||'--') + '</td></tr>'; });
-                        html += '</tbody></table>';
-                    }
-                    body.innerHTML = html;
-                } else {
-                    badge.textContent = 'Not Connected';
-                    badge.style.background = '#fee2e2'; badge.style.color = '#991b1b';
-                    body.innerHTML = '<div class="no-data">TikTok not connected. <a href="/tiktok-setup" style="color:#667eea">Click here to set up TikTok Ads</a></div>';
-                }
-            } catch(e) { body.innerHTML = '<div class="no-data">Failed: ' + e.message + '</div>'; }
-        }
-
-        async function loadGooglePerformance() {
-            const body = document.getElementById('google-body');
-            const badge = document.getElementById('google-status-badge');
-            try {
-                const res = await fetch(API + '/campaigns/');
-                const all = await res.json();
-                const google = all.filter(c => c.platform === 'google_ads');
-                const active = google.filter(c => c.status === 'active');
-                badge.textContent = active.length + ' Active';
-                const totalSpend = google.reduce((s,c) => s + (c.spend||0) + (c.total_spend||0), 0);
-                const totalRevenue = google.reduce((s,c) => s + (c.revenue||0) + (c.total_revenue||0), 0);
-                const roas = totalSpend > 0 ? totalRevenue/totalSpend : 0;
-                body.innerHTML = '<div class="channel-metrics">' +
-                    '<div class="ch-metric"><div class="val">' + google.length + '</div><div class="lbl">Total</div></div>' +
-                    '<div class="ch-metric"><div class="val positive">' + active.length + '</div><div class="lbl">Active</div></div>' +
-                    '<div class="ch-metric"><div class="val">$' + totalSpend.toFixed(2) + '</div><div class="lbl">Spend</div></div>' +
-                    '<div class="ch-metric"><div class="val">$' + totalRevenue.toFixed(2) + '</div><div class="lbl">Revenue</div></div>' +
-                    '<div class="ch-metric"><div class="val">' + roas.toFixed(2) + 'x</div><div class="lbl">ROAS</div></div></div>';
-            } catch(e) { body.innerHTML = '<div class="no-data">Failed: ' + e.message + '</div>'; }
-        }
-
-        async function loadActivity() {
-            const c = document.getElementById('activity-log');
-            try {
-                const res = await fetch(API + '/dashboard/activity?limit=10');
-                const logs = await res.json();
-                if (!logs || logs.length === 0) { c.innerHTML = '<div class="no-data">No activity yet.</div>'; return; }
-                c.innerHTML = logs.map(l => '<div class="activity-item"><div class="activity-time">' + (l.timestamp ? new Date(l.timestamp).toLocaleString() : '--') + '</div><div class="activity-desc"><strong>' + (l.action||'') + '</strong>: ' + (l.details||l.entity_type||'') + '</div></div>').join('');
-            } catch(e) { c.innerHTML = '<div class="no-data">Failed to load activity</div>'; }
-        }
-
+        async function loadDashboardStatus() { try { const res = await fetch(API + '/dashboard/status'); if (!res.ok) throw new Error('HTTP ' + res.status); const d = await res.json(); hideError(); const grid = document.getElementById('top-metrics'); const roas = d.roas_today || 0; const roasClass = roas >= 2 ? 'positive' : roas >= 1 ? 'warning' : 'negative'; grid.innerHTML = '<div class="metric-card"><div class="metric-value neutral">$' + (d.spend_today||0).toFixed(2) + '</div><div class="metric-label">Today Spend</div></div><div class="metric-card"><div class="metric-value positive">$' + (d.revenue_today||0).toFixed(2) + '</div><div class="metric-label">Today Revenue</div></div><div class="metric-card"><div class="metric-value ' + roasClass + '">' + roas.toFixed(1) + 'x</div><div class="metric-label">Today ROAS</div></div><div class="metric-card"><div class="metric-value neutral">' + (d.orders_today||0) + '</div><div class="metric-label">Today Orders</div></div>'; document.getElementById('status-dot').className = 'status-dot ' + (d.status === 'operational' ? 'ok' : 'warn'); document.getElementById('system-status').textContent = d.status || 'Unknown'; document.getElementById('last-opt').textContent = 'Last optimization: ' + (d.last_optimization || '--'); document.getElementById('actions-today').textContent = 'Actions today: ' + (d.actions_today || 0); } catch(e) { showError('Failed to load dashboard: ' + e.message); } }
+        async function loadMetaPerformance() { const body = document.getElementById('meta-body'); const badge = document.getElementById('meta-status-badge'); try { const statusRes = await fetch(API + '/meta/status'); const status = await statusRes.json(); badge.textContent = status.connected ? 'Connected' : 'Disconnected'; if (!status.connected) { badge.style.background = '#fee2e2'; badge.style.color = '#991b1b'; } const perfRes = await fetch(API + '/dashboard/meta-performance'); const perf = await perfRes.json(); if (perf.error) { body.innerHTML = '<div class="no-data">' + perf.error + '</div>'; return; } const s = perf.summary || {}; body.innerHTML = '<div class="channel-metrics"><div class="ch-metric"><div class="val">' + (s.total_campaigns||0) + '</div><div class="lbl">Campaigns</div></div><div class="ch-metric"><div class="val">$' + (s.total_spend||0).toFixed(2) + '</div><div class="lbl">Spend (7d)</div></div><div class="ch-metric"><div class="val">' + (s.total_impressions||0).toLocaleString() + '</div><div class="lbl">Impressions</div></div><div class="ch-metric"><div class="val">' + (s.total_clicks||0).toLocaleString() + '</div><div class="lbl">Clicks</div></div><div class="ch-metric"><div class="val">' + (s.avg_ctr||0) + '%</div><div class="lbl">CTR</div></div><div class="ch-metric"><div class="val">$' + (s.avg_cpc||0).toFixed(2) + '</div><div class="lbl">Avg CPC</div></div></div>'; } catch(e) { body.innerHTML = '<div class="no-data">Failed: ' + e.message + '</div>'; } }
+        async function loadTikTokPerformance() { const body = document.getElementById('tiktok-body'); const badge = document.getElementById('tiktok-status-badge'); try { const statusRes = await fetch(API + '/tiktok/status'); const status = await statusRes.json(); if (status.connected) { badge.textContent = 'Connected'; const perfRes = await fetch(API + '/tiktok/performance'); const perf = await perfRes.json(); if (perf.error) { body.innerHTML = '<div class="no-data">' + perf.error + '</div>'; return; } const s = perf.summary || {}; const camps = perf.campaigns || []; let html = '<div class="channel-metrics"><div class="ch-metric"><div class="val">' + (s.total_campaigns||0) + '</div><div class="lbl">Campaigns</div></div><div class="ch-metric"><div class="val">$' + (s.total_spend||0).toFixed(2) + '</div><div class="lbl">Spend (7d)</div></div><div class="ch-metric"><div class="val">' + (s.total_impressions||0).toLocaleString() + '</div><div class="lbl">Impressions</div></div><div class="ch-metric"><div class="val">' + (s.total_clicks||0).toLocaleString() + '</div><div class="lbl">Clicks</div></div><div class="ch-metric"><div class="val">' + (s.avg_ctr||0) + '%</div><div class="lbl">CTR</div></div><div class="ch-metric"><div class="val">$' + (s.avg_cpc||0).toFixed(2) + '</div><div class="lbl">Avg CPC</div></div></div>'; if (camps.length > 0) { html += '<table class="campaign-table"><thead><tr><th>Campaign</th><th>Status</th><th>Budget</th><th>Objective</th></tr></thead><tbody>'; camps.forEach(c => { html += '<tr><td>' + (c.name||'--') + '</td><td><span class="status-' + (c.status||'') + '">' + (c.status||'--') + '</span></td><td>$' + (c.budget||0) + '</td><td>' + (c.objective||'--') + '</td></tr>'; }); html += '</tbody></table>'; } body.innerHTML = html; } else { badge.textContent = 'Not Connected'; badge.style.background = '#fee2e2'; badge.style.color = '#991b1b'; body.innerHTML = '<div class="no-data">TikTok not connected. <a href="/tiktok-setup" style="color:#667eea">Click here to set up TikTok Ads</a></div>'; } } catch(e) { body.innerHTML = '<div class="no-data">Failed: ' + e.message + '</div>'; } }
+        async function loadGooglePerformance() { const body = document.getElementById('google-body'); const badge = document.getElementById('google-status-badge'); try { const res = await fetch(API + '/campaigns/'); const all = await res.json(); const google = all.filter(c => c.platform === 'google_ads'); const active = google.filter(c => c.status === 'active'); badge.textContent = active.length + ' Active'; const totalSpend = google.reduce((s,c) => s + (c.spend||0) + (c.total_spend||0), 0); const totalRevenue = google.reduce((s,c) => s + (c.revenue||0) + (c.total_revenue||0), 0); const roas = totalSpend > 0 ? totalRevenue/totalSpend : 0; body.innerHTML = '<div class="channel-metrics"><div class="ch-metric"><div class="val">' + google.length + '</div><div class="lbl">Total</div></div><div class="ch-metric"><div class="val positive">' + active.length + '</div><div class="lbl">Active</div></div><div class="ch-metric"><div class="val">$' + totalSpend.toFixed(2) + '</div><div class="lbl">Spend</div></div><div class="ch-metric"><div class="val">$' + totalRevenue.toFixed(2) + '</div><div class="lbl">Revenue</div></div><div class="ch-metric"><div class="val">' + roas.toFixed(2) + 'x</div><div class="lbl">ROAS</div></div></div>'; } catch(e) { body.innerHTML = '<div class="no-data">Failed: ' + e.message + '</div>'; } }
+        async function loadActivity() { const c = document.getElementById('activity-log'); try { const res = await fetch(API + '/dashboard/activity?limit=10'); const logs = await res.json(); if (!logs || logs.length === 0) { c.innerHTML = '<div class="no-data">No activity yet.</div>'; return; } c.innerHTML = logs.map(l => '<div class="activity-item"><div class="activity-time">' + (l.timestamp ? new Date(l.timestamp).toLocaleString() : '--') + '</div><div class="activity-desc"><strong>' + (l.action||'') + '</strong>: ' + (l.details||l.entity_type||'') + '</div></div>').join(''); } catch(e) { c.innerHTML = '<div class="no-data">Failed to load activity</div>'; } }
         async function pauseAll() { if (!confirm('Pause ALL campaigns?')) return; try { const r = await fetch(API+'/dashboard/pause-all',{method:'POST'}); const d = await r.json(); alert('Paused '+d.campaigns_paused+' campaigns'); refreshAll(); } catch(e) { alert('Failed: '+e.message); } }
         function viewReports() { window.open('/docs','_blank'); }
         async function syncProducts() { try { const r = await fetch(API+'/products/sync-shopify',{method:'POST'}); const d = await r.json(); alert('Synced '+(d.synced||d.products_synced||0)+' products'); } catch(e) { alert('Sync failed: '+e.message); } }
