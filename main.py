@@ -1,8 +1,8 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
-v1.0.1 - Fix thumbnail upload: use video_cover_url from upload response
-       instead of multipart file upload (which returns empty image_id).
-       URL-based image upload to TikTok works reliably.
+v1.1.0 - Complete dashboard rebuild with TikTok metrics + aggregate top boxes
+       - All routers registered (dashboard, meta, tiktok, campaigns, etc.)
+       - Top 4 summary boxes aggregate across all ad platforms
 """
 
 import os
@@ -10,7 +10,6 @@ import sys
 import logging
 from datetime import datetime
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("AutoSEM")
 
@@ -19,45 +18,49 @@ def create_app():
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
 
-    app = FastAPI(title="AutoSEM", description="Autonomous SEM Platform", version="1.0.1")
+    app = FastAPI(title="AutoSEM", description="Autonomous SEM Platform", version="1.1.0")
 
-    # Mount static files if they exist
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.isdir(static_dir):
         app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-    # Initialize templates
     templates_dir = os.path.join(os.path.dirname(__file__), "templates")
+    templates = None
     if os.path.isdir(templates_dir):
         templates = Jinja2Templates(directory=templates_dir)
 
-    # Initialize database
     from app.database import init_db
     init_db()
 
-    # Import and register routers
+    # Register ALL routers
+    router_configs = [
+        ("app.routers.dashboard", "/api/v1/dashboard", "Dashboard"),
+        ("app.routers.meta", "/api/v1/meta", "Meta"),
+        ("app.routers.tiktok", "/api/v1/tiktok", "TikTok"),
+        ("app.routers.campaigns", "/api/v1/campaigns", "Campaigns"),
+        ("app.routers.products", "/api/v1/products", "Products"),
+        ("app.routers.settings", "/api/v1/settings", "Settings"),
+        ("app.routers.automation", "/api/v1/automation", "Automation"),
+        ("app.routers.deploy", "/api/v1/deploy", "Deploy"),
+    ]
+
     routers_loaded = []
-    try:
-        from app.routers import deploy
-        app.include_router(deploy.router, prefix="/api/v1/deploy", tags=["Deploy"])
-        routers_loaded.append("deploy")
-    except Exception as e:
-        logger.warning(f"Deploy router not loaded: {e}")
+    for module_path, prefix, tag in router_configs:
+        try:
+            import importlib
+            mod = importlib.import_module(module_path)
+            app.include_router(mod.router, prefix=prefix, tags=[tag])
+            routers_loaded.append(tag.lower())
+        except Exception as e:
+            logger.warning(f"{tag} router not loaded: {e}")
 
-    try:
-        from app.routers import tiktok
-        app.include_router(tiktok.router, prefix="/api/v1/tiktok", tags=["TikTok"])
-        routers_loaded.append("tiktok")
-    except Exception as e:
-        logger.warning(f"TikTok router not loaded: {e}")
-
-    logger.info(f"AutoSEM: ✅ All routers loaded - v1.0.1 Fix thumbnail upload via video_cover_url")
+    logger.info(f"AutoSEM v1.1.0: Loaded routers: {', '.join(routers_loaded)}")
 
     @app.get("/")
     def root():
         return {
             "name": "AutoSEM",
-            "version": "1.0.1",
+            "version": "1.1.0",
             "status": "running",
             "routers": routers_loaded,
             "timestamp": datetime.utcnow().isoformat(),
@@ -67,31 +70,34 @@ def create_app():
     def health():
         return {
             "status": "healthy",
-            "version": "1.0.1",
-            "tiktok_router": "loaded" if "tiktok" in routers_loaded else "not loaded",
-            "deploy_router": "loaded" if "deploy" in routers_loaded else "not loaded",
-            "features": [
-                "tt_user_identity",
-                "spark_ads_video",
-                "video_thumbnail_extraction",
-                "video_cover_url_thumbnail",
-                "auto_thumbnail_upload",
-                "pangle_location_fix",
-                "safe_data_parsing",
-            ],
-            "identity_strategy": "TT_USER Spark Ads - video_cover_url thumbnail (v1.0.1)",
+            "version": "1.1.0",
+            "routers_loaded": routers_loaded,
+            "router_count": len(routers_loaded),
         }
 
     @app.get("/version")
     def version():
-        return {"version": "1.0.1"}
+        return {"version": "1.1.0"}
 
     @app.get("/dashboard")
     def dashboard():
-        try:
-            return templates.TemplateResponse("dashboard.html", {"request": {}, "version": "1.0.1"})
-        except Exception:
-            return {"message": "Dashboard template not found", "api_docs": "/docs"}
+        if templates:
+            try:
+                from starlette.requests import Request
+                from starlette.datastructures import URL
+                scope = {"type": "http", "method": "GET", "path": "/dashboard", "query_string": b"", "headers": []}
+                request = Request(scope)
+                return templates.TemplateResponse("dashboard.html", {"request": request, "version": "1.1.0"})
+            except Exception as e:
+                logger.error(f"Template error: {e}")
+                # Fallback: serve file directly
+                from fastapi.responses import HTMLResponse
+                tpl_path = os.path.join(templates_dir, "dashboard.html")
+                if os.path.exists(tpl_path):
+                    with open(tpl_path) as f:
+                        return HTMLResponse(content=f.read())
+        from fastapi.responses import JSONResponse
+        return JSONResponse(content={"message": "Dashboard template not found", "api_docs": "/docs"})
 
     return app
 
