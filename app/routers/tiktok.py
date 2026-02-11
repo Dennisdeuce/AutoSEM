@@ -1,5 +1,6 @@
 """TikTok Ads router - OAuth, campaign creation, and performance tracking
 
+v1.0.2 - Fix: Add timestamp to campaign name to prevent "name already exists" error
 v1.0.1 - Fix: Use video_cover_url from upload response for thumbnail
          Multipart image file upload returns empty image_id.
          URL-based upload from video_cover_url works reliably.
@@ -608,15 +609,23 @@ def check_tiktok_status(db: Session = Depends(get_db)):
 
 @router.post("/launch-campaign", summary="Launch TikTok Ad Campaign")
 def launch_campaign(daily_budget: float = Query(20.0),
-                    campaign_name: str = Query("Court Sportswear - Tennis Apparel"),
+                    campaign_name: str = Query(None),
                     db: Session = Depends(get_db)):
-    """Full campaign launch: campaign -> ad group -> upload images -> generate video + thumbnail -> create ad."""
+    """Full campaign launch: campaign -> ad group -> upload images -> generate video + thumbnail -> create ad.
+
+    v1.0.2: Campaign name now auto-generated with timestamp to prevent duplicates.
+    """
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"success": False, "error": "TikTok not connected."}
     access_token, advertiser_id = creds["access_token"], creds["advertiser_id"]
     steps = []
     adgroup_budget = max(daily_budget, 20.0)
+
+    # Generate unique campaign name with timestamp
+    if not campaign_name:
+        ts = datetime.utcnow().strftime("%m%d_%H%M")
+        campaign_name = f"Court Sportswear - Tennis {ts}"
 
     try:
         # Step 1: Create campaign
