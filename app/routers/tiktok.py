@@ -1,22 +1,18 @@
 """TikTok Ads router - OAuth, campaign creation, and performance tracking
 
-v1.0.0 - Fix: TikTok requires thumbnail image_ids for SINGLE_VIDEO ads
+v1.0.1 - Fix: Use video_cover_url from upload response for thumbnail
+         Multipart image file upload returns empty image_id.
+         URL-based upload from video_cover_url works reliably.
 
 Ad creation strategy priority:
-1. SINGLE_VIDEO + TT_USER + extracted video thumbnail (9:16 match)
-2. SINGLE_VIDEO + TT_USER + TikTok poster_url as thumbnail
-3. SINGLE_VIDEO + TT_USER without thumbnail (fallback)
-4. Pangle display ad (audience network with location_ids)
+1. SINGLE_VIDEO + TT_USER + video_cover_url thumbnail (9:16 match)
+2. SINGLE_VIDEO + TT_USER + poster_url thumbnail (fallback)
+3. SINGLE_VIDEO + TT_USER + product image thumbnail
+4. Pangle display ad (audience network)
 
-Key insight: TikTok API returns "You must upload an image" for SINGLE_VIDEO
-ads without image_ids. The thumbnail must match the video aspect ratio (9:16).
-Solution: Extract a frame from the generated video using ffmpeg.
-
-Identity types (as of early 2026):
-- TT_USER: Primary identity for Spark Ads. Links to actual TikTok account.
-  CUSTOMIZED_USER is deprecated and returns "Custom identities are no longer supported."
-- BC_AUTH_TT: Business Center authorized accounts.
-- CUSTOMIZED_USER: DEPRECATED by TikTok as of early 2026.
+Key insight: TikTok video upload response includes video_cover_url - a 9:16
+auto-generated cover image. Uploading this URL as an image via UPLOAD_BY_URL
+gives us a thumbnail that perfectly matches the video aspect ratio.
 """
 
 import os
@@ -221,88 +217,29 @@ def _upload_images(access_token: str, advertiser_id: str, image_urls: list) -> l
     return image_ids
 
 
-# ── Thumbnail Extraction ──
+def _upload_image_by_url(access_token: str, advertiser_id: str, image_url: str,
+                         file_name: str = None) -> str:
+    """Upload a single image by URL, return image_id.
 
-def _extract_thumbnail_from_video(video_path: str) -> str:
-    """Extract a single frame from video as a 9:16 thumbnail image using ffmpeg.
-
-    Returns path to the extracted thumbnail JPEG, or empty string on failure.
-    The thumbnail will be 1080x1920 (9:16) matching the video dimensions.
+    v1.0.1: This is the reliable method for thumbnails. Multipart file upload
+    returns empty image_id, but URL-based upload works consistently.
     """
-    ffmpeg_exe = _get_ffmpeg_path()
-    if not ffmpeg_exe or not os.path.exists(video_path):
+    if not image_url:
         return ""
-    try:
-        thumb_path = video_path.replace(".mp4", "_thumb.jpg")
-        # Extract frame at 1 second mark, scale to 1080x1920
-        cmd = [
-            ffmpeg_exe, "-y",
-            "-i", video_path,
-            "-ss", "1",           # seek to 1 second
-            "-vframes", "1",       # extract 1 frame
-            "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
-            "-q:v", "2",           # high quality JPEG
-            thumb_path,
-        ]
-        result = subprocess.run(cmd, capture_output=True, timeout=30)
-        if result.returncode == 0 and os.path.exists(thumb_path):
-            size = os.path.getsize(thumb_path)
-            logger.info(f"Thumbnail extracted: {thumb_path} ({size} bytes)")
-            if size > 500:
-                return thumb_path
-        logger.error(f"Thumbnail extraction failed: {result.stderr.decode()[:300]}")
-        return ""
-    except Exception as e:
-        logger.error(f"Thumbnail extraction error: {e}")
-        return ""
-
-
-def _upload_thumbnail(access_token: str, advertiser_id: str, thumb_path: str) -> str:
-    """Upload a local thumbnail image file to TikTok, return image_id."""
-    if not thumb_path or not os.path.exists(thumb_path):
-        return ""
-    url = f"{TIKTOK_API_BASE}/file/image/ad/upload/"
-    headers = {"Access-Token": access_token}
-    try:
-        with open(thumb_path, "rb") as f:
-            file_content = f.read()
-        files = {"image_file": (os.path.basename(thumb_path), io.BytesIO(file_content), "image/jpeg")}
-        data = {
-            "advertiser_id": advertiser_id,
-            "upload_type": "UPLOAD_BY_FILE",
-            "file_name": f"thumb_{int(time.time())}.jpg",
-        }
-        resp = requests.post(url, headers=headers, data=data, files=files, timeout=60)
-        resp.raise_for_status()
-        result = resp.json()
-        if result.get("code") == 0:
-            img_id = _safe_get_data(result, "image_id")
-            if img_id:
-                logger.info(f"Thumbnail uploaded: {img_id}")
-                return img_id
-        logger.error(f"Thumbnail upload failed: {result.get('message')}")
-        return ""
-    except Exception as e:
-        logger.error(f"Thumbnail upload error: {e}")
-        return ""
-
-
-def _get_video_poster_url(access_token: str, advertiser_id: str, video_id: str) -> str:
-    """Get TikTok's auto-generated poster_url for an uploaded video."""
-    if not video_id:
-        return ""
-    # Try the video info endpoint
-    result = _tiktok_api("GET", "/file/video/ad/info/", access_token,
-                         params={"advertiser_id": advertiser_id,
-                                 "video_ids": json.dumps([video_id])})
+    if not file_name:
+        file_name = f"thumb_{int(time.time())}.jpg"
+    result = _tiktok_api("POST", "/file/image/ad/upload/", access_token, data={
+        "advertiser_id": advertiser_id,
+        "upload_type": "UPLOAD_BY_URL",
+        "image_url": image_url,
+        "file_name": file_name,
+    })
     if result.get("code") == 0:
-        data = _safe_get_data(result)
-        video_list = data.get("list", [])
-        if video_list:
-            poster = video_list[0].get("poster_url", "")
-            if poster:
-                logger.info(f"Got poster_url from TikTok: {poster[:80]}...")
-                return poster
+        img_id = _safe_get_data(result, "image_id")
+        if img_id:
+            logger.info(f"Image uploaded by URL: {img_id}")
+            return img_id
+    logger.error(f"URL image upload failed: code={result.get('code')}, msg={result.get('message')}")
     return ""
 
 
@@ -361,7 +298,10 @@ def _download_images_for_video(image_urls: list, max_images: int = 5) -> list:
 
 def _generate_and_upload_video(access_token: str, advertiser_id: str,
                                 image_urls: list = None) -> dict:
-    """Full pipeline: download images -> create video -> extract thumbnail -> upload both.
+    """Full pipeline: download images -> create video -> upload -> get thumbnail from video_cover_url.
+
+    v1.0.1 FIX: Uses video_cover_url from TikTok's video upload response
+    instead of multipart file upload (which returns empty image_id).
 
     Returns dict with video_id AND thumbnail_image_id for use in ad creation.
     """
@@ -390,58 +330,59 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
         return {"video_id": "", "thumbnail_image_id": "", "steps": steps,
                 "error": "Video creation failed (ffmpeg not available)"}
 
-    # Step: Extract thumbnail from video (9:16 frame)
-    thumb_path = _extract_thumbnail_from_video(video_path)
-    steps.append({"step": "extract_thumbnail", "success": bool(thumb_path),
-                  "file_size": os.path.getsize(thumb_path) if thumb_path and os.path.exists(thumb_path) else 0})
-
     # Step: Upload video to TikTok
     video_id = ""
+    video_cover_url = ""
     try:
         result = _tiktok_upload(
             "/file/video/ad/upload/", access_token, advertiser_id,
             video_path, file_field="video_file",
             extra_data={"upload_type": "UPLOAD_BY_FILE",
                        "file_name": f"court_sportswear_{int(time.time())}.mp4"})
-        upload_video_id = _safe_get_data(result, "video_id")
+        upload_data = _safe_get_data(result)
+        upload_video_id = upload_data.get("video_id", "") if isinstance(upload_data, dict) else _safe_get_data(result, "video_id")
+        video_cover_url = upload_data.get("video_cover_url", "") if isinstance(upload_data, dict) else ""
         steps.append({"step": "upload_video", "code": result.get("code"),
-                      "message": result.get("message"), "video_id": upload_video_id})
+                      "message": result.get("message"), "video_id": upload_video_id,
+                      "video_cover_url": video_cover_url[:100] if video_cover_url else ""})
         if result.get("code") == 0 and upload_video_id:
             video_id = upload_video_id
-            logger.info(f"Video uploaded successfully: {video_id}")
+            logger.info(f"Video uploaded: {video_id}, cover_url: {video_cover_url[:80] if video_cover_url else 'none'}")
     except Exception as e:
         steps.append({"step": "upload_video", "error": str(e)})
-
-    # Step: Upload thumbnail to TikTok
-    thumbnail_image_id = ""
-    if thumb_path:
-        thumbnail_image_id = _upload_thumbnail(access_token, advertiser_id, thumb_path)
-        steps.append({"step": "upload_thumbnail", "image_id": thumbnail_image_id,
-                      "method": "extracted_frame"})
-        try:
-            os.remove(thumb_path)
-        except Exception:
-            pass
-
-    # Fallback: If local thumbnail failed, try TikTok's poster_url
-    if not thumbnail_image_id and video_id:
-        # Wait briefly for TikTok to process the video
-        time.sleep(2)
-        poster_url = _get_video_poster_url(access_token, advertiser_id, video_id)
-        if poster_url:
-            result = _tiktok_api("POST", "/file/image/ad/upload/", access_token, data={
-                "advertiser_id": advertiser_id, "upload_type": "UPLOAD_BY_URL",
-                "image_url": poster_url, "file_name": f"poster_{int(time.time())}.jpg"})
-            if result.get("code") == 0:
-                thumbnail_image_id = _safe_get_data(result, "image_id")
-            steps.append({"step": "upload_thumbnail_poster", "image_id": thumbnail_image_id,
-                          "method": "tiktok_poster_url", "poster_url": poster_url[:100]})
 
     # Clean up video file
     try:
         os.remove(video_path)
     except Exception:
         pass
+
+    # Step: Upload thumbnail using video_cover_url (v1.0.1 fix)
+    thumbnail_image_id = ""
+    if video_cover_url:
+        thumbnail_image_id = _upload_image_by_url(
+            access_token, advertiser_id, video_cover_url,
+            file_name=f"cover_{int(time.time())}.jpg")
+        steps.append({"step": "upload_thumbnail", "image_id": thumbnail_image_id,
+                      "method": "video_cover_url"})
+
+    # Fallback: If video_cover_url failed, try poster_url from video info endpoint
+    if not thumbnail_image_id and video_id:
+        time.sleep(2)
+        poster_result = _tiktok_api("GET", "/file/video/ad/info/", access_token,
+                                     params={"advertiser_id": advertiser_id,
+                                             "video_ids": json.dumps([video_id])})
+        if poster_result.get("code") == 0:
+            poster_data = _safe_get_data(poster_result)
+            video_list = poster_data.get("list", [])
+            if video_list:
+                poster_url = video_list[0].get("poster_url", "") or video_list[0].get("video_cover_url", "")
+                if poster_url:
+                    thumbnail_image_id = _upload_image_by_url(
+                        access_token, advertiser_id, poster_url,
+                        file_name=f"poster_{int(time.time())}.jpg")
+                    steps.append({"step": "upload_thumbnail_poster", "image_id": thumbnail_image_id,
+                                  "method": "poster_url"})
 
     return {"video_id": video_id, "thumbnail_image_id": thumbnail_image_id, "steps": steps}
 
@@ -453,21 +394,18 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
                    campaign_id: str = "", thumbnail_image_id: str = "") -> dict:
     """Try multiple ad creation strategies in priority order.
 
-    v1.0.0 FIX: TikTok requires image_ids (thumbnail) for SINGLE_VIDEO ads.
-    We now extract a 9:16 thumbnail from the video and include it.
+    v1.0.1: thumbnail_image_id now comes from video_cover_url (reliable).
 
-    Strategy 1: SINGLE_VIDEO + TT_USER + video thumbnail (9:16)
+    Strategy 1: SINGLE_VIDEO + TT_USER + video_cover_url thumbnail
     Strategy 2: SINGLE_VIDEO + TT_USER + product image thumbnail
     Strategy 3: SINGLE_VIDEO + TT_USER without thumbnail (last resort)
-    Strategy 4: Pangle display (with location_ids)
+    Strategy 4: Pangle display (audience network)
     """
     identity_id = identity.get("identity_id", "")
     identity_type = identity.get("identity_type", "TT_USER")
-    display_name = identity.get("display_name", "Court Sportswear")
     attempts = []
 
-    # Determine best thumbnail to use
-    # Priority: extracted video thumbnail > uploaded product image
+    # Determine best thumbnail: video_cover_url thumbnail > product image
     best_thumb = thumbnail_image_id or image_id
 
     # ── Strategy 1: SINGLE_VIDEO + TT_USER + video thumbnail ──
@@ -487,13 +425,13 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
             "creatives": [creative], "operation_status": "ENABLE"})
         ad_ids = _safe_get_data(result, "ad_ids")
-        attempts.append({"strategy": "video_with_thumbnail", "code": result.get("code"),
+        attempts.append({"strategy": "video_with_cover_thumb", "code": result.get("code"),
                         "message": result.get("message"), "ad_ids": ad_ids,
                         "thumbnail_used": best_thumb,
                         "identity_type_used": identity_type})
         if result.get("code") == 0 and ad_ids:
             return {"success": True, "ad_ids": ad_ids,
-                    "strategy": "video_with_thumbnail", "attempts": attempts}
+                    "strategy": "video_with_cover_thumb", "attempts": attempts}
 
     # ── Strategy 2: SINGLE_VIDEO + product image as thumbnail ──
     if video_id and identity_id and image_id and image_id != best_thumb:
@@ -513,13 +451,12 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "creatives": [creative], "operation_status": "ENABLE"})
         ad_ids = _safe_get_data(result, "ad_ids")
         attempts.append({"strategy": "video_with_product_thumb", "code": result.get("code"),
-                        "message": result.get("message"), "ad_ids": ad_ids,
-                        "identity_type_used": identity_type})
+                        "message": result.get("message"), "ad_ids": ad_ids})
         if result.get("code") == 0 and ad_ids:
             return {"success": True, "ad_ids": ad_ids,
                     "strategy": "video_with_product_thumb", "attempts": attempts}
 
-    # ── Strategy 3: SINGLE_VIDEO without CTA, with thumbnail ──
+    # ── Strategy 3: SINGLE_VIDEO without CTA ──
     if video_id and identity_id and best_thumb:
         creative = {
             "ad_name": f"Court Sportswear - Shop Now {int(time.time()) % 10000}",
@@ -535,14 +472,13 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "advertiser_id": advertiser_id, "adgroup_id": adgroup_id,
             "creatives": [creative], "operation_status": "ENABLE"})
         ad_ids = _safe_get_data(result, "ad_ids")
-        attempts.append({"strategy": "video_no_cta_with_thumb", "code": result.get("code"),
-                        "message": result.get("message"), "ad_ids": ad_ids,
-                        "identity_type_used": identity_type})
+        attempts.append({"strategy": "video_no_cta", "code": result.get("code"),
+                        "message": result.get("message"), "ad_ids": ad_ids})
         if result.get("code") == 0 and ad_ids:
             return {"success": True, "ad_ids": ad_ids,
-                    "strategy": "video_no_cta_with_thumb", "attempts": attempts}
+                    "strategy": "video_no_cta", "attempts": attempts}
 
-    # ── Strategy 4: Pangle display (with location_ids) ──
+    # ── Strategy 4: Pangle display ──
     if image_id and campaign_id and identity_id:
         schedule_start = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         ag_result = _tiktok_api("POST", "/adgroup/create/", access_token, data={
@@ -556,7 +492,6 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             "billing_event": "CPC", "optimization_goal": "CLICK",
             "bid_type": "BID_TYPE_NO_BID", "pacing": "PACING_MODE_SMOOTH",
             "operation_status": "ENABLE",
-            "location_ids": ["6252001"],
             "gender": "GENDER_UNLIMITED",
             "age_groups": ["AGE_25_34", "AGE_35_44", "AGE_45_54"],
         })
@@ -579,17 +514,16 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
                 "creatives": [creative], "operation_status": "ENABLE"})
             ad_ids = _safe_get_data(ad_result, "ad_ids")
             attempts.append({"strategy": "pangle_image_ad", "code": ad_result.get("code"),
-                             "message": ad_result.get("message"), "adgroup_id": pangle_ag_id,
-                             "ad_ids": ad_ids})
+                             "message": ad_result.get("message"), "ad_ids": ad_ids})
             if ad_result.get("code") == 0 and ad_ids:
                 return {"success": True, "ad_ids": ad_ids,
                         "pangle_adgroup_id": pangle_ag_id, "strategy": "pangle_image",
                         "attempts": attempts}
 
     if not video_id:
-        attempts.append({"strategy": "info", "message": "No video_id available. Check ffmpeg availability."})
+        attempts.append({"strategy": "info", "message": "No video_id available."})
     if not best_thumb:
-        attempts.append({"strategy": "info", "message": "No thumbnail available. Both video frame extraction and image upload failed."})
+        attempts.append({"strategy": "info", "message": "No thumbnail available."})
 
     return {"success": False, "attempts": attempts}
 
@@ -721,7 +655,7 @@ def launch_campaign(daily_budget: float = Query(20.0),
         image_ids = _upload_images(access_token, advertiser_id, product_urls)
         steps.append({"step": "upload_images", "count": len(image_ids)})
 
-        # Step 4: Generate video + extract thumbnail + upload both
+        # Step 4: Generate video + get thumbnail from video_cover_url
         video_result = _generate_and_upload_video(access_token, advertiser_id, product_urls)
         video_id = video_result.get("video_id", "")
         thumbnail_image_id = video_result.get("thumbnail_image_id", "")
@@ -790,7 +724,7 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
     identity = _find_best_identity(access_token, advertiser_id)
     steps.append({"step": "identity", "result": identity})
     if not identity.get("identity_id"):
-        return {"success": False, "error": "No identity found. Link a TikTok account in TikTok Ads Manager.", "steps": steps}
+        return {"success": False, "error": "No identity found.", "steps": steps}
 
     image_id = image_ids[0] if image_ids else ""
     ad_result = _try_create_ad(access_token, advertiser_id, adgroup_id,
@@ -803,7 +737,7 @@ def create_ad_for_adgroup(adgroup_id: str = Query(...),
                 "strategy": ad_result.get("strategy"),
                 "video_id": video_id, "thumbnail_image_id": thumbnail_image_id,
                 "steps": steps}
-    return {"success": False, "error": "All strategies failed. Check steps for details.", "steps": steps}
+    return {"success": False, "error": "All strategies failed.", "steps": steps}
 
 
 # ── Video Upload Endpoints ──
@@ -849,7 +783,6 @@ def list_videos(db: Session = Depends(get_db)):
     creds = _get_active_token(db)
     if not creds["access_token"]:
         return {"error": "Not connected"}
-    # Try multiple endpoints for video listing
     for endpoint in ["/file/video/ad/info/", "/file/video/ad/get/"]:
         result = _tiktok_api("GET", endpoint, creds["access_token"],
                              params={"advertiser_id": creds["advertiser_id"], "page_size": 50})
@@ -912,7 +845,7 @@ def debug_ffmpeg():
 
 @router.get("/debug-raw-upload", summary="Test video upload and show raw response")
 def debug_raw_upload(db: Session = Depends(get_db)):
-    """Debug endpoint: Generate video, extract thumbnail, upload, return RAW response."""
+    """Debug: Generate video, upload, show raw response with video_cover_url."""
     creds = _get_active_token(db)
     if not creds["access_token"]:
         return {"error": "Not connected"}
@@ -933,39 +866,36 @@ def debug_raw_upload(db: Session = Depends(get_db)):
 
     file_size = os.path.getsize(video_path)
 
-    # Extract thumbnail
-    thumb_path = _extract_thumbnail_from_video(video_path)
-    thumb_size = os.path.getsize(thumb_path) if thumb_path else 0
-
     # Upload video
     raw_result = _tiktok_upload(
         "/file/video/ad/upload/", access_token, advertiser_id,
         video_path, file_field="video_file",
         extra_data={"upload_type": "UPLOAD_BY_FILE", "file_name": f"debug_{int(time.time())}.mp4"})
 
-    # Upload thumbnail
-    thumb_image_id = ""
-    if thumb_path:
-        thumb_image_id = _upload_thumbnail(access_token, advertiser_id, thumb_path)
-        try:
-            os.remove(thumb_path)
-        except Exception:
-            pass
-
     try:
         os.remove(video_path)
     except Exception:
         pass
 
+    # Extract video_cover_url from response
+    upload_data = _safe_get_data(raw_result)
+    video_cover_url = upload_data.get("video_cover_url", "") if isinstance(upload_data, dict) else ""
+    video_id = upload_data.get("video_id", "") if isinstance(upload_data, dict) else ""
+
+    # Upload thumbnail from video_cover_url
+    thumb_image_id = ""
+    if video_cover_url:
+        thumb_image_id = _upload_image_by_url(access_token, advertiser_id, video_cover_url)
+
     return {"file_size": file_size, "raw_response": raw_result,
-            "extracted_video_id": _safe_get_data(raw_result, "video_id"),
-            "thumbnail": {"extracted": bool(thumb_path), "size": thumb_size,
-                         "image_id": thumb_image_id}}
+            "extracted_video_id": video_id,
+            "video_cover_url": video_cover_url[:150] if video_cover_url else "",
+            "thumbnail": {"method": "video_cover_url", "image_id": thumb_image_id}}
 
 
 @router.get("/debug-thumbnail", summary="Test thumbnail extraction pipeline")
 def debug_thumbnail(db: Session = Depends(get_db)):
-    """Debug: Test the full thumbnail extraction and upload pipeline."""
+    """Debug: Test the full video + thumbnail pipeline."""
     creds = _get_active_token(db)
     if not creds["access_token"]:
         return {"error": "Not connected"}
