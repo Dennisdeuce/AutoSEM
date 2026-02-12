@@ -1,5 +1,6 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v1.2.0 - Add: Campaign management, interest targeting, targeted campaigns
 v1.1.0 - Complete dashboard rebuild with TikTok metrics + aggregate top boxes
        - All routers registered (dashboard, meta, tiktok, campaigns, etc.)
        - Top 4 summary boxes aggregate across all ad platforms
@@ -18,7 +19,7 @@ def create_app():
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
 
-    app = FastAPI(title="AutoSEM", description="Autonomous SEM Platform", version="1.1.0")
+    app = FastAPI(title="AutoSEM", description="Autonomous SEM Platform", version="1.2.0")
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.isdir(static_dir):
@@ -54,13 +55,13 @@ def create_app():
         except Exception as e:
             logger.warning(f"{tag} router not loaded: {e}")
 
-    logger.info(f"AutoSEM v1.1.0: Loaded routers: {', '.join(routers_loaded)}")
+    logger.info(f"AutoSEM v1.2.0: Loaded routers: {', '.join(routers_loaded)}")
 
     @app.get("/")
     def root():
         return {
             "name": "AutoSEM",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "status": "running",
             "routers": routers_loaded,
             "timestamp": datetime.utcnow().isoformat(),
@@ -70,14 +71,14 @@ def create_app():
     def health():
         return {
             "status": "healthy",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "routers_loaded": routers_loaded,
             "router_count": len(routers_loaded),
         }
 
     @app.get("/version")
     def version():
-        return {"version": "1.1.0"}
+        return {"version": "1.2.0"}
 
     @app.get("/dashboard")
     def dashboard():
@@ -87,10 +88,9 @@ def create_app():
                 from starlette.datastructures import URL
                 scope = {"type": "http", "method": "GET", "path": "/dashboard", "query_string": b"", "headers": []}
                 request = Request(scope)
-                return templates.TemplateResponse("dashboard.html", {"request": request, "version": "1.1.0"})
+                return templates.TemplateResponse("dashboard.html", {"request": request, "version": "1.2.0"})
             except Exception as e:
                 logger.error(f"Template error: {e}")
-                # Fallback: serve file directly
                 from fastapi.responses import HTMLResponse
                 tpl_path = os.path.join(templates_dir, "dashboard.html")
                 if os.path.exists(tpl_path):
