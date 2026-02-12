@@ -1,5 +1,6 @@
 """TikTok Ads router - OAuth, campaign creation, and performance tracking
 
+v1.2.0 - Add: /pause-all-campaigns, /launch-targeted-campaign, /targeting-categories, /targeting-keywords
 v1.1.0 - Fix: /performance endpoint returns per-campaign metrics (spend, impressions, clicks, ctr, cpc)
 v1.0.2 - Fix: Add timestamp to campaign name to prevent "name already exists" error
 v1.0.1 - Fix: Use video_cover_url from upload response for thumbnail
@@ -221,11 +222,7 @@ def _upload_images(access_token: str, advertiser_id: str, image_urls: list) -> l
 
 def _upload_image_by_url(access_token: str, advertiser_id: str, image_url: str,
                          file_name: str = None) -> str:
-    """Upload a single image by URL, return image_id.
-
-    v1.0.1: This is the reliable method for thumbnails. Multipart file upload
-    returns empty image_id, but URL-based upload works consistently.
-    """
+    """Upload a single image by URL, return image_id."""
     if not image_url:
         return ""
     if not file_name:
@@ -300,13 +297,7 @@ def _download_images_for_video(image_urls: list, max_images: int = 5) -> list:
 
 def _generate_and_upload_video(access_token: str, advertiser_id: str,
                                 image_urls: list = None) -> dict:
-    """Full pipeline: download images -> create video -> upload -> get thumbnail from video_cover_url.
-
-    v1.0.1 FIX: Uses video_cover_url from TikTok's video upload response
-    instead of multipart file upload (which returns empty image_id).
-
-    Returns dict with video_id AND thumbnail_image_id for use in ad creation.
-    """
+    """Full pipeline: download images -> create video -> upload -> get thumbnail from video_cover_url."""
     if not image_urls:
         image_urls = _get_product_images()[:5]
     steps = []
@@ -321,7 +312,6 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
     steps.append({"step": "create_video", "success": success,
                   "file_size": os.path.getsize(video_path) if success and os.path.exists(video_path) else 0})
 
-    # Clean up downloaded images
     for p in image_paths:
         try:
             os.remove(p)
@@ -332,7 +322,6 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
         return {"video_id": "", "thumbnail_image_id": "", "steps": steps,
                 "error": "Video creation failed (ffmpeg not available)"}
 
-    # Step: Upload video to TikTok
     video_id = ""
     video_cover_url = ""
     try:
@@ -353,13 +342,11 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
     except Exception as e:
         steps.append({"step": "upload_video", "error": str(e)})
 
-    # Clean up video file
     try:
         os.remove(video_path)
     except Exception:
         pass
 
-    # Step: Upload thumbnail using video_cover_url (v1.0.1 fix)
     thumbnail_image_id = ""
     if video_cover_url:
         thumbnail_image_id = _upload_image_by_url(
@@ -368,7 +355,6 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
         steps.append({"step": "upload_thumbnail", "image_id": thumbnail_image_id,
                       "method": "video_cover_url"})
 
-    # Fallback: If video_cover_url failed, try poster_url from video info endpoint
     if not thumbnail_image_id and video_id:
         time.sleep(2)
         poster_result = _tiktok_api("GET", "/file/video/ad/info/", access_token,
@@ -394,23 +380,12 @@ def _generate_and_upload_video(access_token: str, advertiser_id: str,
 def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
                    image_id: str, identity: dict, video_id: str = "",
                    campaign_id: str = "", thumbnail_image_id: str = "") -> dict:
-    """Try multiple ad creation strategies in priority order.
-
-    v1.0.1: thumbnail_image_id now comes from video_cover_url (reliable).
-
-    Strategy 1: SINGLE_VIDEO + TT_USER + video_cover_url thumbnail
-    Strategy 2: SINGLE_VIDEO + TT_USER + product image thumbnail
-    Strategy 3: SINGLE_VIDEO + TT_USER without thumbnail (last resort)
-    Strategy 4: Pangle display (audience network)
-    """
+    """Try multiple ad creation strategies in priority order."""
     identity_id = identity.get("identity_id", "")
     identity_type = identity.get("identity_type", "TT_USER")
     attempts = []
-
-    # Determine best thumbnail: video_cover_url thumbnail > product image
     best_thumb = thumbnail_image_id or image_id
 
-    # ── Strategy 1: SINGLE_VIDEO + TT_USER + video thumbnail ──
     if video_id and identity_id and best_thumb:
         creative = {
             "ad_name": f"Court Sportswear - Tennis Video {int(time.time()) % 10000}",
@@ -435,7 +410,6 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             return {"success": True, "ad_ids": ad_ids,
                     "strategy": "video_with_cover_thumb", "attempts": attempts}
 
-    # ── Strategy 2: SINGLE_VIDEO + product image as thumbnail ──
     if video_id and identity_id and image_id and image_id != best_thumb:
         creative = {
             "ad_name": f"Court Sportswear - Performance Gear {int(time.time()) % 10000}",
@@ -458,7 +432,6 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             return {"success": True, "ad_ids": ad_ids,
                     "strategy": "video_with_product_thumb", "attempts": attempts}
 
-    # ── Strategy 3: SINGLE_VIDEO without CTA ──
     if video_id and identity_id and best_thumb:
         creative = {
             "ad_name": f"Court Sportswear - Shop Now {int(time.time()) % 10000}",
@@ -480,7 +453,6 @@ def _try_create_ad(access_token: str, advertiser_id: str, adgroup_id: str,
             return {"success": True, "ad_ids": ad_ids,
                     "strategy": "video_no_cta", "attempts": attempts}
 
-    # ── Strategy 4: Pangle display ──
     if image_id and campaign_id and identity_id:
         schedule_start = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         ag_result = _tiktok_api("POST", "/adgroup/create/", access_token, data={
@@ -612,10 +584,7 @@ def check_tiktok_status(db: Session = Depends(get_db)):
 def launch_campaign(daily_budget: float = Query(20.0),
                     campaign_name: str = Query(None),
                     db: Session = Depends(get_db)):
-    """Full campaign launch: campaign -> ad group -> upload images -> generate video + thumbnail -> create ad.
-
-    v1.0.2: Campaign name now auto-generated with timestamp to prevent duplicates.
-    """
+    """Full campaign launch: campaign -> ad group -> upload images -> generate video + thumbnail -> create ad."""
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"success": False, "error": "TikTok not connected."}
@@ -623,13 +592,11 @@ def launch_campaign(daily_budget: float = Query(20.0),
     steps = []
     adgroup_budget = max(daily_budget, 20.0)
 
-    # Generate unique campaign name with timestamp
     if not campaign_name:
         ts = datetime.utcnow().strftime("%m%d_%H%M")
         campaign_name = f"Court Sportswear - Tennis {ts}"
 
     try:
-        # Step 1: Create campaign
         camp = _tiktok_api("POST", "/campaign/create/", access_token, data={
             "advertiser_id": advertiser_id, "campaign_name": campaign_name,
             "objective_type": "TRAFFIC", "budget_mode": "BUDGET_MODE_INFINITE",
@@ -641,7 +608,6 @@ def launch_campaign(daily_budget: float = Query(20.0),
         if not campaign_id:
             return {"success": False, "error": "No campaign_id in response", "steps": steps}
 
-        # Step 2: Create ad group
         schedule = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         ag = _tiktok_api("POST", "/adgroup/create/", access_token, data={
             "advertiser_id": advertiser_id, "campaign_id": campaign_id,
@@ -660,12 +626,10 @@ def launch_campaign(daily_budget: float = Query(20.0),
         if not adgroup_id:
             return {"success": False, "error": "No adgroup_id in response", "steps": steps, "campaign_id": campaign_id}
 
-        # Step 3: Upload product images (for Pangle fallback)
         product_urls = _get_product_images()[:5]
         image_ids = _upload_images(access_token, advertiser_id, product_urls)
         steps.append({"step": "upload_images", "count": len(image_ids)})
 
-        # Step 4: Generate video + get thumbnail from video_cover_url
         video_result = _generate_and_upload_video(access_token, advertiser_id, product_urls)
         video_id = video_result.get("video_id", "")
         thumbnail_image_id = video_result.get("thumbnail_image_id", "")
@@ -673,11 +637,9 @@ def launch_campaign(daily_budget: float = Query(20.0),
                       "thumbnail_image_id": thumbnail_image_id,
                       "details": video_result.get("steps", [])})
 
-        # Step 5: Find identity (TT_USER for Spark Ads)
         identity = _find_best_identity(access_token, advertiser_id)
         steps.append({"step": "identity", "result": identity})
 
-        # Step 6: Create ad (video + thumbnail required)
         image_id = image_ids[0] if image_ids else ""
         ad_result = _try_create_ad(access_token, advertiser_id, adgroup_id,
                                     image_id, identity, video_id, campaign_id,
@@ -818,17 +780,6 @@ def list_identities(db: Session = Depends(get_db)):
     return {"advertiser_id": creds["advertiser_id"], "identities": all_ids}
 
 
-@router.get("/debug-image-upload", summary="Test image upload")
-def debug_image_upload(image_url: str = Query(PRODUCT_IMAGES[0]), db: Session = Depends(get_db)):
-    creds = _get_active_token(db)
-    if not creds["access_token"]:
-        return {"error": "Not connected"}
-    result = _tiktok_api("POST", "/file/image/ad/upload/", creds["access_token"], data={
-        "advertiser_id": creds["advertiser_id"], "upload_type": "UPLOAD_BY_URL", "image_url": image_url})
-    return {"image_url": image_url, "result": result,
-            "extracted_image_id": _safe_get_data(result, "image_id")}
-
-
 @router.get("/debug-ffmpeg", summary="Check ffmpeg availability")
 def debug_ffmpeg():
     info = {"system_ffmpeg": False, "bundled_ffmpeg": False, "resolved_path": ""}
@@ -853,86 +804,15 @@ def debug_ffmpeg():
     return info
 
 
-@router.get("/debug-raw-upload", summary="Test video upload and show raw response")
-def debug_raw_upload(db: Session = Depends(get_db)):
-    """Debug: Generate video, upload, show raw response with video_cover_url."""
-    creds = _get_active_token(db)
-    if not creds["access_token"]:
-        return {"error": "Not connected"}
-    access_token, advertiser_id = creds["access_token"], creds["advertiser_id"]
-    image_urls = _get_product_images()[:2]
-    image_paths = _download_images_for_video(image_urls)
-    if not image_paths:
-        return {"error": "No images downloaded"}
-    video_path = tempfile.mktemp(suffix=".mp4")
-    success = _create_minimal_mp4(image_paths, video_path, duration_per_image=2)
-    for p in image_paths:
-        try:
-            os.remove(p)
-        except Exception:
-            pass
-    if not success:
-        return {"error": "Video creation failed", "ffmpeg_available": bool(_get_ffmpeg_path())}
-
-    file_size = os.path.getsize(video_path)
-
-    # Upload video
-    raw_result = _tiktok_upload(
-        "/file/video/ad/upload/", access_token, advertiser_id,
-        video_path, file_field="video_file",
-        extra_data={"upload_type": "UPLOAD_BY_FILE", "file_name": f"debug_{int(time.time())}.mp4"})
-
-    try:
-        os.remove(video_path)
-    except Exception:
-        pass
-
-    # Extract video_cover_url from response
-    upload_data = _safe_get_data(raw_result)
-    video_cover_url = upload_data.get("video_cover_url", "") if isinstance(upload_data, dict) else ""
-    video_id = upload_data.get("video_id", "") if isinstance(upload_data, dict) else ""
-
-    # Upload thumbnail from video_cover_url
-    thumb_image_id = ""
-    if video_cover_url:
-        thumb_image_id = _upload_image_by_url(access_token, advertiser_id, video_cover_url)
-
-    return {"file_size": file_size, "raw_response": raw_result,
-            "extracted_video_id": video_id,
-            "video_cover_url": video_cover_url[:150] if video_cover_url else "",
-            "thumbnail": {"method": "video_cover_url", "image_id": thumb_image_id}}
-
-
-@router.get("/debug-thumbnail", summary="Test thumbnail extraction pipeline")
-def debug_thumbnail(db: Session = Depends(get_db)):
-    """Debug: Test the full video + thumbnail pipeline."""
-    creds = _get_active_token(db)
-    if not creds["access_token"]:
-        return {"error": "Not connected"}
-    result = _generate_and_upload_video(creds["access_token"], creds["advertiser_id"],
-                                        _get_product_images()[:2])
-    return {
-        "video_id": result.get("video_id"),
-        "thumbnail_image_id": result.get("thumbnail_image_id"),
-        "steps": result.get("steps"),
-        "thumbnail_ready": bool(result.get("thumbnail_image_id")),
-    }
-
-
 # ── Performance Endpoints ──
 
 @router.get("/performance", summary="Get TikTok Performance Data (with per-campaign metrics)")
 def get_tiktok_performance(db: Session = Depends(get_db)):
-    """Fetch TikTok campaign list AND per-campaign performance metrics.
-
-    v1.1.0: Joins campaign metadata with reporting API data so each campaign
-    includes spend, impressions, clicks, CTR, and CPC - matching Meta's format.
-    """
+    """Fetch TikTok campaign list AND per-campaign performance metrics."""
     creds = _get_active_token(db)
     if not creds["access_token"] or not creds["advertiser_id"]:
         return {"error": "TikTok not connected"}
     try:
-        # Step 1: Get all campaigns
         result = _tiktok_api("GET", "/campaign/get/", creds["access_token"],
                            params={"advertiser_id": creds["advertiser_id"], "page_size": 100})
         campaigns_raw = []
@@ -940,10 +820,9 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
             data = _safe_get_data(result)
             campaigns_raw = data.get("list", [])
 
-        # Step 2: Get per-campaign performance metrics from reporting API
         end = datetime.utcnow().strftime("%Y-%m-%d")
         start = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
-        campaign_metrics = {}  # campaign_id -> {spend, impressions, clicks, ctr, cpc}
+        campaign_metrics = {}
 
         stats = _tiktok_api("GET", "/report/integrated/get/", creds["access_token"], params={
             "advertiser_id": creds["advertiser_id"], "report_type": "BASIC",
@@ -967,7 +846,6 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
                         "reach": int(m.get("reach", 0)),
                     }
 
-        # Step 3: Build enriched campaign list with metrics joined in
         total_spend = total_imp = total_clicks = total_reach = 0
         campaigns = []
         for c in campaigns_raw:
@@ -991,17 +869,11 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
                 "status": c.get("operation_status", ""),
                 "objective": c.get("objective_type", ""),
                 "budget": c.get("budget", 0),
-                "spend": spend,
-                "impressions": impressions,
-                "clicks": clicks,
-                "ctr": ctr,
-                "cpc": cpc,
-                "reach": reach,
+                "spend": spend, "impressions": impressions,
+                "clicks": clicks, "ctr": ctr, "cpc": cpc, "reach": reach,
             })
 
-        # Sort: campaigns with spend first, then by spend descending
         campaigns.sort(key=lambda x: x["spend"], reverse=True)
-
         avg_ctr = round((total_clicks / total_imp * 100) if total_imp else 0, 2)
         avg_cpc = round((total_spend / total_clicks) if total_clicks else 0, 2)
 
@@ -1020,6 +892,205 @@ def get_tiktok_performance(db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"TikTok performance error: {e}")
         return {"error": str(e)}
+
+
+# ── Targeting Discovery ──
+
+@router.get("/targeting-categories", summary="Get TikTok interest categories for targeting")
+def get_targeting_categories(db: Session = Depends(get_db)):
+    """Query TikTok interest category taxonomy to find tennis/sports IDs."""
+    creds = _get_active_token(db)
+    if not creds["access_token"]:
+        return {"error": "Not connected"}
+    result = _tiktok_api("GET", "/tool/interest_category/", creds["access_token"],
+                         params={"advertiser_id": creds["advertiser_id"], "language": "en"})
+    if result.get("code") != 0:
+        return {"error": result.get("message"), "raw": result}
+    data = _safe_get_data(result)
+    categories = data.get("interest_categories", []) or data.get("list", [])
+    sports_keywords = ["sport", "tennis", "fitness", "athletic", "outdoor", "racket",
+                       "pickleball", "exercise", "apparel", "clothing", "fashion"]
+    relevant = []
+    for cat in categories:
+        name = (cat.get("interest_category_name", "") or cat.get("name", "")).lower()
+        if any(kw in name for kw in sports_keywords):
+            relevant.append(cat)
+    return {"total_categories": len(categories), "sports_relevant": relevant,
+            "all_categories": categories[:100]}
+
+
+@router.get("/targeting-keywords", summary="Search TikTok interest keywords")
+def get_targeting_keywords(keyword: str = Query("tennis"), db: Session = Depends(get_db)):
+    """Search TikTok keyword targeting for specific terms like tennis, pickleball."""
+    creds = _get_active_token(db)
+    if not creds["access_token"]:
+        return {"error": "Not connected"}
+    result = _tiktok_api("GET", "/tool/interest_keyword/recommend/", creds["access_token"],
+                         params={"advertiser_id": creds["advertiser_id"],
+                                 "keyword": keyword, "language": "en", "limit": 50})
+    if result.get("code") != 0:
+        result = _tiktok_api("GET", "/tool/interest_keyword/get/", creds["access_token"],
+                             params={"advertiser_id": creds["advertiser_id"],
+                                     "keyword": keyword, "language": "en"})
+    return {"keyword": keyword, "result": result}
+
+
+# ── Campaign Management (API-level) ──
+
+@router.post("/pause-all-campaigns", summary="Pause ALL TikTok campaigns via API")
+def pause_all_campaigns(db: Session = Depends(get_db)):
+    """Actually pause campaigns on TikTok platform, not just local DB."""
+    creds = _get_active_token(db)
+    if not creds["access_token"]:
+        return {"error": "Not connected"}
+    access_token, advertiser_id = creds["access_token"], creds["advertiser_id"]
+    result = _tiktok_api("GET", "/campaign/get/", access_token,
+                         params={"advertiser_id": advertiser_id, "page_size": 100})
+    if result.get("code") != 0:
+        return {"error": result.get("message")}
+    data = _safe_get_data(result)
+    campaigns = data.get("list", [])
+    paused, errors, already_paused = [], [], []
+    for c in campaigns:
+        cid = str(c.get("campaign_id", ""))
+        status = c.get("operation_status", "")
+        name = c.get("campaign_name", "")
+        if status in ["DISABLE", "FROZEN"]:
+            already_paused.append({"id": cid, "name": name, "status": status})
+            continue
+        pr = _tiktok_api("POST", "/campaign/update/status/", access_token, data={
+            "advertiser_id": advertiser_id, "campaign_ids": [cid], "operation_status": "DISABLE"})
+        if pr.get("code") == 0:
+            paused.append({"id": cid, "name": name})
+        else:
+            errors.append({"id": cid, "name": name, "error": pr.get("message")})
+    try:
+        db.query(CampaignModel).filter(CampaignModel.platform == "tiktok").update({"status": "PAUSED"})
+        db.add(ActivityLogModel(action="TIKTOK_ALL_CAMPAIGNS_PAUSED", entity_type="campaign",
+                                entity_id="all", details=f"Paused {len(paused)} campaigns via API"))
+        db.commit()
+    except Exception:
+        pass
+    return {"total_campaigns": len(campaigns), "paused": len(paused),
+            "already_paused": len(already_paused), "errors": len(errors),
+            "paused_list": paused, "already_paused_list": already_paused, "error_list": errors}
+
+
+@router.post("/launch-targeted-campaign", summary="Launch properly targeted tennis campaign")
+def launch_targeted_campaign(daily_budget: float = Query(20.0),
+                             campaign_name: str = Query(None),
+                             interest_category_ids: str = Query(None),
+                             interest_keyword_ids: str = Query(None),
+                             db: Session = Depends(get_db)):
+    """Launch campaign with proper tennis/sports interest targeting.
+    Auto-discovers sports/fitness categories if no IDs provided."""
+    creds = _get_active_token(db)
+    if not creds["access_token"] or not creds["advertiser_id"]:
+        return {"success": False, "error": "TikTok not connected."}
+    access_token, advertiser_id = creds["access_token"], creds["advertiser_id"]
+    steps = []
+    adgroup_budget = max(daily_budget, 20.0)
+    if not campaign_name:
+        ts = datetime.utcnow().strftime("%m%d_%H%M")
+        campaign_name = f"Court Sportswear - Tennis Targeted {ts}"
+
+    targeting_data = {}
+    if interest_category_ids:
+        targeting_data["interest_category_ids"] = json.loads(interest_category_ids) if isinstance(interest_category_ids, str) else interest_category_ids
+        steps.append({"step": "targeting", "method": "provided", "ids": targeting_data["interest_category_ids"]})
+    elif interest_keyword_ids:
+        targeting_data["interest_keyword_ids"] = json.loads(interest_keyword_ids) if isinstance(interest_keyword_ids, str) else interest_keyword_ids
+        steps.append({"step": "targeting", "method": "provided_keywords"})
+    else:
+        cat_result = _tiktok_api("GET", "/tool/interest_category/", access_token,
+                                 params={"advertiser_id": advertiser_id, "language": "en"})
+        if cat_result.get("code") == 0:
+            cat_data = _safe_get_data(cat_result)
+            all_cats = cat_data.get("interest_categories", []) or cat_data.get("list", [])
+            target_names = ["sports", "fitness", "outdoor", "athletic", "apparel", "clothing"]
+            found_ids, found_names = [], []
+            for cat in all_cats:
+                name = (cat.get("interest_category_name", "") or cat.get("name", "")).lower()
+                cat_id = cat.get("interest_category_id") or cat.get("id")
+                if cat_id and any(t in name for t in target_names):
+                    found_ids.append(str(cat_id))
+                    found_names.append(name)
+            if found_ids:
+                targeting_data["interest_category_ids"] = found_ids[:10]
+                steps.append({"step": "auto_targeting", "found": len(found_ids),
+                             "using": found_ids[:10], "names": found_names[:10]})
+            else:
+                steps.append({"step": "auto_targeting", "warning": "No matching categories", "total": len(all_cats)})
+        else:
+            steps.append({"step": "auto_targeting", "error": cat_result.get("message")})
+
+    try:
+        camp = _tiktok_api("POST", "/campaign/create/", access_token, data={
+            "advertiser_id": advertiser_id, "campaign_name": campaign_name,
+            "objective_type": "TRAFFIC", "budget_mode": "BUDGET_MODE_INFINITE",
+            "operation_status": "ENABLE"})
+        steps.append({"step": "campaign", "code": camp.get("code"), "message": camp.get("message")})
+        if camp.get("code") != 0:
+            return {"success": False, "error": camp.get("message"), "steps": steps}
+        campaign_id = _safe_get_data(camp, "campaign_id")
+
+        schedule = (datetime.utcnow() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        adgroup_data = {
+            "advertiser_id": advertiser_id, "campaign_id": campaign_id,
+            "adgroup_name": f"{campaign_name} - Tennis Enthusiasts 25-54",
+            "placement_type": "PLACEMENT_TYPE_AUTOMATIC", "promotion_type": "WEBSITE",
+            "budget_mode": "BUDGET_MODE_DAY", "budget": adgroup_budget,
+            "schedule_type": "SCHEDULE_FROM_NOW", "schedule_start_time": schedule,
+            "billing_event": "CPC", "optimization_goal": "CLICK",
+            "bid_type": "BID_TYPE_NO_BID", "pacing": "PACING_MODE_SMOOTH",
+            "operation_status": "ENABLE", "location_ids": ["6252001"],
+            "gender": "GENDER_UNLIMITED", "age_groups": ["AGE_25_34", "AGE_35_44", "AGE_45_54"],
+        }
+        if targeting_data.get("interest_category_ids"):
+            adgroup_data["interest_category_ids"] = targeting_data["interest_category_ids"]
+        if targeting_data.get("interest_keyword_ids"):
+            adgroup_data["interest_keyword_ids"] = targeting_data["interest_keyword_ids"]
+
+        ag = _tiktok_api("POST", "/adgroup/create/", access_token, data=adgroup_data)
+        steps.append({"step": "adgroup", "code": ag.get("code"), "message": ag.get("message"), "targeting": targeting_data})
+        if ag.get("code") != 0:
+            return {"success": False, "error": ag.get("message"), "steps": steps, "campaign_id": campaign_id}
+        adgroup_id = _safe_get_data(ag, "adgroup_id")
+
+        product_urls = _get_product_images()[:5]
+        image_ids = _upload_images(access_token, advertiser_id, product_urls)
+        steps.append({"step": "upload_images", "count": len(image_ids)})
+
+        video_result = _generate_and_upload_video(access_token, advertiser_id, product_urls)
+        video_id = video_result.get("video_id", "")
+        thumbnail_image_id = video_result.get("thumbnail_image_id", "")
+        steps.append({"step": "video", "video_id": video_id, "thumbnail_id": thumbnail_image_id})
+
+        identity = _find_best_identity(access_token, advertiser_id)
+        steps.append({"step": "identity", "result": identity})
+
+        image_id = image_ids[0] if image_ids else ""
+        ad_result = _try_create_ad(access_token, advertiser_id, adgroup_id,
+                                    image_id, identity, video_id, campaign_id, thumbnail_image_id)
+        steps.append({"step": "create_ad", "result": ad_result})
+
+        ad_id = None
+        if ad_result.get("success"):
+            ad_ids = ad_result.get("ad_ids", [])
+            ad_id = ad_ids[0] if ad_ids else None
+
+        db.add(CampaignModel(platform="tiktok", platform_campaign_id=str(campaign_id),
+                             name=campaign_name, status="ACTIVE", campaign_type="TRAFFIC",
+                             daily_budget=adgroup_budget))
+        db.add(ActivityLogModel(action="TIKTOK_TARGETED_CAMPAIGN_LAUNCHED", entity_type="campaign",
+                                entity_id=str(campaign_id), details=f"Targeted with: {targeting_data}"))
+        db.commit()
+
+        return {"success": True, "campaign_id": campaign_id, "adgroup_id": adgroup_id,
+                "ad_id": ad_id, "video_id": video_id, "targeting": targeting_data,
+                "daily_budget": adgroup_budget, "ad_strategy": ad_result.get("strategy"), "steps": steps}
+    except Exception as e:
+        return {"success": False, "error": str(e), "steps": steps}
 
 
 @router.get("/advertiser-info", summary="Get advertiser info")
