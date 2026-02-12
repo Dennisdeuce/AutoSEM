@@ -1,5 +1,6 @@
 """TikTok Ads router - OAuth, campaign creation, and performance tracking
 
+v1.2.1 - Fix: /pause-all-campaigns uses correct endpoint /campaign/update/ with campaign_id
 v1.2.0 - Add: /pause-all-campaigns, /launch-targeted-campaign, /targeting-categories, /targeting-keywords
 v1.1.0 - Fix: /performance endpoint returns per-campaign metrics (spend, impressions, clicks, ctr, cpc)
 v1.0.2 - Fix: Add timestamp to campaign name to prevent "name already exists" error
@@ -122,6 +123,14 @@ def _tiktok_api(method: str, endpoint: str, access_token: str, params: dict = No
             resp = requests.post(url, headers=headers, json=data, timeout=30)
         resp.raise_for_status()
         return resp.json()
+    except requests.exceptions.HTTPError as e:
+        # Try to parse JSON error body even on HTTP errors
+        try:
+            return e.response.json()
+        except Exception:
+            pass
+        logger.error(f"TikTok API HTTP error: {e}")
+        return {"code": -1, "message": str(e)}
     except Exception as e:
         logger.error(f"TikTok API error: {e}")
         return {"code": -1, "message": str(e)}
@@ -939,7 +948,7 @@ def get_targeting_keywords(keyword: str = Query("tennis"), db: Session = Depends
 
 @router.post("/pause-all-campaigns", summary="Pause ALL TikTok campaigns via API")
 def pause_all_campaigns(db: Session = Depends(get_db)):
-    """Actually pause campaigns on TikTok platform, not just local DB."""
+    """Actually pause campaigns on TikTok platform using /campaign/update/ endpoint."""
     creds = _get_active_token(db)
     if not creds["access_token"]:
         return {"error": "Not connected"}
@@ -958,12 +967,15 @@ def pause_all_campaigns(db: Session = Depends(get_db)):
         if status in ["DISABLE", "FROZEN"]:
             already_paused.append({"id": cid, "name": name, "status": status})
             continue
-        pr = _tiktok_api("POST", "/campaign/update/status/", access_token, data={
-            "advertiser_id": advertiser_id, "campaign_ids": [cid], "operation_status": "DISABLE"})
+        # v1.2.1 FIX: Use /campaign/update/ with campaign_id (singular), not /campaign/update/status/
+        pr = _tiktok_api("POST", "/campaign/update/", access_token, data={
+            "advertiser_id": advertiser_id,
+            "campaign_id": cid,
+            "operation_status": "DISABLE"})
         if pr.get("code") == 0:
             paused.append({"id": cid, "name": name})
         else:
-            errors.append({"id": cid, "name": name, "error": pr.get("message")})
+            errors.append({"id": cid, "name": name, "error": pr.get("message"), "code": pr.get("code")})
     try:
         db.query(CampaignModel).filter(CampaignModel.platform == "tiktok").update({"status": "PAUSED"})
         db.add(ActivityLogModel(action="TIKTOK_ALL_CAMPAIGNS_PAUSED", entity_type="campaign",
@@ -974,6 +986,19 @@ def pause_all_campaigns(db: Session = Depends(get_db)):
     return {"total_campaigns": len(campaigns), "paused": len(paused),
             "already_paused": len(already_paused), "errors": len(errors),
             "paused_list": paused, "already_paused_list": already_paused, "error_list": errors}
+
+
+@router.post("/pause-campaign", summary="Pause a single TikTok campaign")
+def pause_single_campaign(campaign_id: str = Query(...), db: Session = Depends(get_db)):
+    """Pause a single campaign by ID."""
+    creds = _get_active_token(db)
+    if not creds["access_token"]:
+        return {"error": "Not connected"}
+    result = _tiktok_api("POST", "/campaign/update/", creds["access_token"], data={
+        "advertiser_id": creds["advertiser_id"],
+        "campaign_id": campaign_id,
+        "operation_status": "DISABLE"})
+    return {"campaign_id": campaign_id, "code": result.get("code"), "message": result.get("message")}
 
 
 @router.post("/launch-targeted-campaign", summary="Launch properly targeted tennis campaign")
