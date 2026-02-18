@@ -83,6 +83,32 @@ curl -X POST https://auto-sem.replit.app/api/v1/deploy/pull \
   -H "X-Deploy-Key: autosem-deploy-2026"
 ```
 
+**Important — Replit does NOT auto-restart after `deploy/pull`.** The webhook pulls
+new code to disk, but the running process keeps serving the old code. After triggering
+a deploy, you must **manually republish** in the Replit UI (Deployments tab → Redeploy)
+for changes to take effect.
+
+**Chicken-and-egg on first deploy:** If Replit's workspace has no `.git` directory,
+the old deploy.py fails silently. The fixed version (commit `160d766`) initializes
+the git repo automatically, but it must be deployed manually the first time via
+Replit's UI to bootstrap itself.
+
+### Meta Campaign Management Endpoints
+
+Available in repo (`app/routers/meta.py`) but require deploy to Replit:
+
+| Method | Endpoint | Body |
+|--------|----------|------|
+| GET | `/api/v1/meta/status` | — |
+| GET | `/api/v1/meta/campaigns` | — |
+| POST | `/api/v1/meta/activate-campaign` | `{"campaign_id": "..."}` |
+| POST | `/api/v1/meta/pause-campaign` | `{"campaign_id": "..."}` |
+| POST | `/api/v1/meta/set-budget` | `{"campaign_id": "...", "daily_budget": 1500}` |
+
+Currently live on Replit: only `status`, `connect`, `callback`, `refresh`.
+Campaign management endpoints (`activate`, `pause`, `set-budget`, `campaigns`) need
+a Replit redeploy to go live.
+
 ## Environment Variables
 
 See Replit Secrets. Key vars: `DATABASE_URL`, `META_ACCESS_TOKEN`, `META_APP_SECRET`, `META_AD_ACCOUNT_ID`, `TIKTOK_ACCESS_TOKEN`, `TIKTOK_ADVERTISER_ID`, `SHOPIFY_STORE_URL`, `SHOPIFY_ACCESS_TOKEN`, `DEPLOY_KEY`.
