@@ -1,16 +1,19 @@
 """
-Meta Ads OAuth router - Handle Meta platform authentication
+Meta Ads router - OAuth + Campaign Management
+v1.1.0 - Added activate, pause, set-budget endpoints
 """
 
 import os
 import logging
+import time
 
 import requests
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import RedirectResponse, HTMLResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.database import get_db, MetaTokenModel
+from app.database import get_db, MetaTokenModel, ActivityLogModel
 
 logger = logging.getLogger("AutoSEM.Meta")
 router = APIRouter()
@@ -18,6 +21,8 @@ router = APIRouter()
 META_APP_ID = os.environ.get("META_APP_ID", "")
 META_APP_SECRET = os.environ.get("META_APP_SECRET", "")
 META_REDIRECT_URI = os.environ.get("META_REDIRECT_URI", "https://auto-sem.replit.app/api/v1/meta/callback")
+META_AD_ACCOUNT_ID = os.environ.get("META_AD_ACCOUNT_ID", "")
+META_GRAPH_BASE = "https://graph.facebook.com/v19.0"
 
 
 def _get_active_token(db: Session) -> str:
@@ -27,6 +32,23 @@ def _get_active_token(db: Session) -> str:
         return token_record.access_token
     return os.environ.get("META_ACCESS_TOKEN", "")
 
+
+def _log_activity(db: Session, action: str, entity_id: str = None, details: str = None):
+    """Log an activity entry."""
+    try:
+        log = ActivityLogModel(
+            action=action,
+            entity_type="campaign",
+            entity_id=entity_id or "",
+            details=details or "",
+        )
+        db.add(log)
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to log activity: {e}")
+
+
+# ─── OAuth Endpoints ──────────────────────────────────────────────
 
 @router.get("/connect", summary="Connect Meta",
             description="Redirect to Meta OAuth authorization")
@@ -59,7 +81,7 @@ def oauth_callback(
 
     try:
         token_url = (
-            f"https://graph.facebook.com/v19.0/oauth/access_token"
+            f"{META_GRAPH_BASE}/oauth/access_token"
             f"?client_id={META_APP_ID}"
             f"&redirect_uri={META_REDIRECT_URI}"
             f"&client_secret={META_APP_SECRET}"
@@ -74,7 +96,7 @@ def oauth_callback(
             return HTMLResponse(content="<h1>Error</h1><p>No token received</p>")
 
         long_url = (
-            f"https://graph.facebook.com/v19.0/oauth/access_token"
+            f"{META_GRAPH_BASE}/oauth/access_token"
             f"?grant_type=fb_exchange_token"
             f"&client_id={META_APP_ID}"
             f"&client_secret={META_APP_SECRET}"
@@ -115,20 +137,17 @@ def check_meta_status(db: Session = Depends(get_db)):
         return {"connected": False, "message": "No Meta token found"}
 
     try:
-        # Debug token to get expiry and scopes
         debug_resp = requests.get(
-            f"https://graph.facebook.com/v19.0/debug_token"
+            f"{META_GRAPH_BASE}/debug_token"
             f"?input_token={access_token}"
             f"&access_token={META_APP_ID}|{META_APP_SECRET}",
             timeout=10,
         )
         debug_data = debug_resp.json().get("data", {}) if debug_resp.status_code == 200 else {}
 
-        # Calculate days remaining
         days_remaining = None
         expires_at = debug_data.get("expires_at", 0)
         if expires_at:
-            import time
             remaining_seconds = expires_at - time.time()
             days_remaining = max(0, int(remaining_seconds / 86400))
 
@@ -149,10 +168,9 @@ def check_meta_status(db: Session = Depends(get_db)):
             return {"connected": False, "message": "Token expired or invalid"}
 
     except Exception as e:
-        # Fallback: just check if /me works
         try:
             resp = requests.get(
-                f"https://graph.facebook.com/v19.0/me?access_token={access_token}",
+                f"{META_GRAPH_BASE}/me?access_token={access_token}",
                 timeout=10,
             )
             if resp.status_code == 200:
@@ -171,7 +189,7 @@ def refresh_meta_token(db: Session = Depends(get_db)):
 
     try:
         url = (
-            f"https://graph.facebook.com/v19.0/oauth/access_token"
+            f"{META_GRAPH_BASE}/oauth/access_token"
             f"?grant_type=fb_exchange_token"
             f"&client_id={META_APP_ID}"
             f"&client_secret={META_APP_SECRET}"
@@ -197,4 +215,192 @@ def refresh_meta_token(db: Session = Depends(get_db)):
 
         return {"status": "error", "message": "No token in response"}
     except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ─── Campaign Management Endpoints ───────────────────────────────
+
+class CampaignActionRequest(BaseModel):
+    campaign_id: str
+
+
+class SetBudgetRequest(BaseModel):
+    campaign_id: str
+    daily_budget_cents: int  # Budget in cents (e.g., 1500 = $15.00)
+
+
+@router.post("/activate-campaign", summary="Activate a Meta campaign",
+             description="Set a campaign status to ACTIVE via Meta Graph API")
+def activate_campaign(req: CampaignActionRequest, db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+
+    try:
+        resp = requests.post(
+            f"{META_GRAPH_BASE}/{req.campaign_id}",
+            data={
+                "status": "ACTIVE",
+                "access_token": access_token,
+            },
+            timeout=15,
+        )
+        result = resp.json()
+
+        if resp.status_code == 200 and result.get("success"):
+            _log_activity(db, "META_CAMPAIGN_ACTIVATED", req.campaign_id,
+                         f"Campaign {req.campaign_id} activated via API")
+            logger.info(f"Meta campaign {req.campaign_id} activated")
+            return {
+                "status": "activated",
+                "campaign_id": req.campaign_id,
+                "meta_response": result,
+            }
+        else:
+            error_msg = result.get("error", {}).get("message", str(result))
+            logger.error(f"Failed to activate campaign: {error_msg}")
+            return {
+                "status": "error",
+                "campaign_id": req.campaign_id,
+                "message": error_msg,
+                "meta_response": result,
+            }
+
+    except Exception as e:
+        logger.error(f"Exception activating campaign: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/pause-campaign", summary="Pause a Meta campaign",
+             description="Set a campaign status to PAUSED via Meta Graph API")
+def pause_campaign(req: CampaignActionRequest, db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+
+    try:
+        resp = requests.post(
+            f"{META_GRAPH_BASE}/{req.campaign_id}",
+            data={
+                "status": "PAUSED",
+                "access_token": access_token,
+            },
+            timeout=15,
+        )
+        result = resp.json()
+
+        if resp.status_code == 200 and result.get("success"):
+            _log_activity(db, "META_CAMPAIGN_PAUSED", req.campaign_id,
+                         f"Campaign {req.campaign_id} paused via API")
+            logger.info(f"Meta campaign {req.campaign_id} paused")
+            return {
+                "status": "paused",
+                "campaign_id": req.campaign_id,
+                "meta_response": result,
+            }
+        else:
+            error_msg = result.get("error", {}).get("message", str(result))
+            logger.error(f"Failed to pause campaign: {error_msg}")
+            return {
+                "status": "error",
+                "campaign_id": req.campaign_id,
+                "message": error_msg,
+                "meta_response": result,
+            }
+
+    except Exception as e:
+        logger.error(f"Exception pausing campaign: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/set-budget", summary="Set campaign daily budget",
+             description="Update daily budget on a campaign's ad sets. Budget in cents (1500 = $15.00)")
+def set_campaign_budget(req: SetBudgetRequest, db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+
+    try:
+        # First, get ad sets under this campaign
+        adsets_resp = requests.get(
+            f"{META_GRAPH_BASE}/{req.campaign_id}/adsets",
+            params={
+                "fields": "id,name,daily_budget,status",
+                "access_token": access_token,
+            },
+            timeout=15,
+        )
+        adsets_data = adsets_resp.json().get("data", [])
+
+        if not adsets_data:
+            return {
+                "status": "error",
+                "message": f"No ad sets found for campaign {req.campaign_id}",
+            }
+
+        updated = []
+        errors = []
+        for adset in adsets_data:
+            adset_id = adset["id"]
+            update_resp = requests.post(
+                f"{META_GRAPH_BASE}/{adset_id}",
+                data={
+                    "daily_budget": req.daily_budget_cents,
+                    "access_token": access_token,
+                },
+                timeout=15,
+            )
+            result = update_resp.json()
+            if update_resp.status_code == 200 and result.get("success"):
+                updated.append({"adset_id": adset_id, "name": adset.get("name", ""), "new_budget_cents": req.daily_budget_cents})
+            else:
+                error_msg = result.get("error", {}).get("message", str(result))
+                errors.append({"adset_id": adset_id, "error": error_msg})
+
+        budget_dollars = req.daily_budget_cents / 100
+        _log_activity(db, "META_BUDGET_SET", req.campaign_id,
+                     f"Budget set to ${budget_dollars:.2f}/day ({req.daily_budget_cents} cents) on {len(updated)} ad sets")
+
+        return {
+            "status": "updated" if updated else "error",
+            "campaign_id": req.campaign_id,
+            "budget_cents": req.daily_budget_cents,
+            "budget_dollars": budget_dollars,
+            "adsets_updated": updated,
+            "errors": errors,
+        }
+
+    except Exception as e:
+        logger.error(f"Exception setting budget: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/campaigns", summary="List Meta campaigns",
+            description="Get all campaigns from the Meta ad account with current status")
+def list_meta_campaigns(db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    ad_account_id = META_AD_ACCOUNT_ID
+    if not access_token or not ad_account_id:
+        return {"status": "error", "message": "Meta not configured"}
+
+    try:
+        resp = requests.get(
+            f"{META_GRAPH_BASE}/act_{ad_account_id}/campaigns",
+            params={
+                "fields": "id,name,status,daily_budget,lifetime_budget,objective",
+                "access_token": access_token,
+                "limit": 100,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        campaigns = resp.json().get("data", [])
+        return {
+            "status": "ok",
+            "count": len(campaigns),
+            "campaigns": campaigns,
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to list campaigns: {e}")
         return {"status": "error", "message": str(e)}
