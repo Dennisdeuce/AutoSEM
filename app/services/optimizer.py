@@ -1,12 +1,14 @@
 """
 Campaign Optimizer Service
 Analyzes campaign performance and makes automated optimization decisions.
+Executes real actions via Meta Ads API (budget changes, pauses, scaling).
 """
 import logging
 from datetime import datetime
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 from app.database import CampaignModel, SettingsModel, ActivityLogModel
+from app.services.meta_ads import MetaAdsService
 
 logger = logging.getLogger("autosem.optimizer")
 
@@ -23,9 +25,12 @@ class CampaignOptimizer:
     BUDGET_DECREASE_FACTOR = 0.75
     MAX_DAILY_BUDGET = 50.0
     MIN_DAILY_BUDGET = 3.0
+    SCALE_WINNER_MAX_BUDGET = 25.0
+    SCALE_WINNER_INCREASE = 1.20  # +20%
 
     def __init__(self, db: Session):
         self.db = db
+        self.meta = MetaAdsService()
         self.settings = self._load_settings()
 
     def _load_settings(self) -> dict:
@@ -68,6 +73,51 @@ class CampaignOptimizer:
             "timestamp": datetime.utcnow().isoformat(),
         }
 
+    def _get_adset_id(self, campaign: CampaignModel) -> Optional[str]:
+        """Resolve the first adset ID for a Meta campaign (needed for budget changes)."""
+        if campaign.platform != "meta" or not campaign.platform_campaign_id:
+            return None
+        adsets = self.meta.get_adsets(campaign.platform_campaign_id)
+        if adsets:
+            return adsets[0].get("id")
+        return None
+
+    def _execute_meta_pause(self, campaign: CampaignModel, reason: str) -> Dict:
+        """Pause a Meta campaign via the API and log the action."""
+        result = {"executed": False}
+        if campaign.platform == "meta" and campaign.platform_campaign_id:
+            api_result = self.meta.pause_campaign(campaign.platform_campaign_id)
+            result = {"executed": api_result.get("success", False), "api_result": api_result}
+        campaign.status = "paused"
+        self._log_auto_optimize(campaign, "pause", reason)
+        return result
+
+    def _execute_meta_budget_change(self, campaign: CampaignModel, new_budget: float, reason: str) -> Dict:
+        """Change budget on a Meta campaign's adset via the API."""
+        result = {"executed": False}
+        if campaign.platform == "meta" and campaign.platform_campaign_id:
+            adset_id = self._get_adset_id(campaign)
+            if adset_id:
+                api_result = self.meta.update_adset_budget(adset_id, new_budget)
+                result = {"executed": api_result.get("success", False), "adset_id": adset_id, "api_result": api_result}
+            else:
+                logger.warning(f"No adset found for campaign {campaign.platform_campaign_id} — budget change local only")
+        old_budget = campaign.daily_budget
+        campaign.daily_budget = round(new_budget, 2)
+        self._log_auto_optimize(campaign, "budget_change", f"{reason} (${old_budget} -> ${new_budget:.2f})")
+        return result
+
+    def _log_auto_optimize(self, campaign: CampaignModel, action_type: str, reason: str):
+        """Log an AUTO_OPTIMIZE action to ActivityLogModel."""
+        log = ActivityLogModel(
+            action="AUTO_OPTIMIZE",
+            entity_type="campaign",
+            entity_id=str(campaign.id),
+            details=f"[{action_type}] {reason}",
+            timestamp=datetime.utcnow(),
+        )
+        self.db.add(log)
+
     def _optimize_campaign(self, campaign: CampaignModel) -> List[Dict]:
         actions = []
 
@@ -89,6 +139,64 @@ class CampaignOptimizer:
         roas = revenue / spend if spend > 0 else 0
         cpc = spend / clicks if clicks > 0 else 0
 
+        # --- Actionable rule: pause_underperformer ---
+        # ROAS < 0.5 after $20+ spend -> auto-pause
+        if spend >= 20 and roas < 0.5:
+            reason = f"ROAS {roas:.2f}x < 0.5 after ${spend:.2f} spend — auto-pausing"
+            result = self._execute_meta_pause(campaign, reason)
+            actions.append({
+                "campaign_id": campaign.id,
+                "action": "pause_underperformer",
+                "reason": reason,
+                "executed": result.get("executed", False),
+            })
+            campaign.updated_at = datetime.utcnow()
+            return actions  # Paused — no further optimization needed
+
+        # --- Actionable rule: flag_landing_page with CPC thresholds ---
+        if clicks >= self.MIN_CLICKS_FOR_DECISION and ctr > self.HIGH_CTR_THRESHOLD and conversion_rate < self.LOW_CONVERSION_RATE:
+            if cpc > 1.00:
+                # CPC > $1.00: auto-pause
+                reason = f"Landing page issue: CTR {ctr:.2%}, conv {conversion_rate:.2%}, CPC ${cpc:.2f} > $1.00 — auto-pausing"
+                result = self._execute_meta_pause(campaign, reason)
+                actions.append({
+                    "campaign_id": campaign.id,
+                    "action": "flag_landing_page_pause",
+                    "reason": reason,
+                    "executed": result.get("executed", False),
+                })
+                campaign.updated_at = datetime.utcnow()
+                return actions
+            elif cpc > 0.50:
+                # CPC > $0.50: auto-reduce budget by 25%
+                new_budget = max((campaign.daily_budget or 10) * 0.75, self.MIN_DAILY_BUDGET)
+                reason = f"Landing page issue: CTR {ctr:.2%}, conv {conversion_rate:.2%}, CPC ${cpc:.2f} > $0.50 — reducing budget 25%"
+                result = self._execute_meta_budget_change(campaign, new_budget, reason)
+                actions.append({
+                    "campaign_id": campaign.id,
+                    "action": "flag_landing_page_budget_cut",
+                    "reason": reason,
+                    "executed": result.get("executed", False),
+                })
+
+        # --- Actionable rule: scale_winner ---
+        # CTR > 3% AND CPC < $0.20 -> auto-increase budget by 20% (cap $25/day)
+        if ctr > 0.03 and cpc < 0.20 and clicks >= self.MIN_CLICKS_FOR_DECISION:
+            new_budget = min(
+                (campaign.daily_budget or 10) * self.SCALE_WINNER_INCREASE,
+                self.SCALE_WINNER_MAX_BUDGET,
+            )
+            if new_budget > (campaign.daily_budget or 0):
+                reason = f"Scale winner: CTR {ctr:.2%}, CPC ${cpc:.2f} — increasing budget 20% (cap $25)"
+                result = self._execute_meta_budget_change(campaign, new_budget, reason)
+                actions.append({
+                    "campaign_id": campaign.id,
+                    "action": "scale_winner",
+                    "reason": reason,
+                    "executed": result.get("executed", False),
+                })
+
+        # --- Existing ROAS-based budget adjustments ---
         if spend > 20:
             if roas >= self.settings["min_roas_threshold"] * 1.5:
                 new_budget = min(
@@ -96,59 +204,54 @@ class CampaignOptimizer:
                     self.MAX_DAILY_BUDGET
                 )
                 if new_budget != campaign.daily_budget:
-                    old_budget = campaign.daily_budget
-                    campaign.daily_budget = round(new_budget, 2)
+                    reason = f"Strong ROAS ({roas:.2f}x) — budget increase"
+                    result = self._execute_meta_budget_change(campaign, new_budget, reason)
                     actions.append({
                         "campaign_id": campaign.id,
                         "action": "budget_increase",
-                        "reason": f"Strong ROAS ({roas:.2f}x), budget {old_budget} -> {new_budget:.2f}",
+                        "reason": reason,
+                        "executed": result.get("executed", False),
                     })
-                    self._log_activity(f"Budget increased for campaign {campaign.id}: ROAS {roas:.2f}x")
 
             elif roas < self.settings["min_roas_threshold"] and spend > 50:
                 new_budget = max(
                     (campaign.daily_budget or 10) * self.BUDGET_DECREASE_FACTOR,
                     self.MIN_DAILY_BUDGET
                 )
-                old_budget = campaign.daily_budget
-                campaign.daily_budget = round(new_budget, 2)
+                reason = f"Low ROAS ({roas:.2f}x < {self.settings['min_roas_threshold']}x) — budget decrease"
+                result = self._execute_meta_budget_change(campaign, new_budget, reason)
                 actions.append({
                     "campaign_id": campaign.id,
                     "action": "budget_decrease",
-                    "reason": f"Low ROAS ({roas:.2f}x < {self.settings['min_roas_threshold']}x), budget {old_budget} -> {new_budget:.2f}",
+                    "reason": reason,
+                    "executed": result.get("executed", False),
                 })
-                self._log_activity(f"Budget decreased for campaign {campaign.id}: ROAS {roas:.2f}x")
 
             elif roas < 0.5 and spend > 100:
-                campaign.status = "paused"
+                reason = f"Very low ROAS ({roas:.2f}x) after ${spend:.2f} spend — pausing"
+                result = self._execute_meta_pause(campaign, reason)
                 actions.append({
                     "campaign_id": campaign.id,
                     "action": "paused",
-                    "reason": f"Very low ROAS ({roas:.2f}x) after ${spend:.2f} spend - pausing",
+                    "reason": reason,
+                    "executed": result.get("executed", False),
                 })
-                self._log_activity(f"Campaign {campaign.id} paused: ROAS {roas:.2f}x after ${spend:.2f} spend")
 
+        # --- Flags (informational only, no API action) ---
         if clicks >= self.MIN_CLICKS_FOR_DECISION:
             if ctr < self.LOW_CTR_THRESHOLD:
                 actions.append({
                     "campaign_id": campaign.id,
                     "action": "flag_low_ctr",
-                    "reason": f"CTR {ctr:.3%} below threshold - consider ad copy refresh",
+                    "reason": f"CTR {ctr:.3%} below threshold — consider ad copy refresh",
                     "suggestion": "refresh_ad_copy",
-                })
-            elif ctr > self.HIGH_CTR_THRESHOLD and conversion_rate < self.LOW_CONVERSION_RATE:
-                actions.append({
-                    "campaign_id": campaign.id,
-                    "action": "flag_landing_page",
-                    "reason": f"Good CTR ({ctr:.2%}) but low conversion ({conversion_rate:.2%}) - landing page issue",
-                    "suggestion": "optimize_landing_page",
                 })
 
         if clicks > 0 and cpc > (campaign.daily_budget or 10) * 0.5:
             actions.append({
                 "campaign_id": campaign.id,
                 "action": "flag_high_cpc",
-                "reason": f"CPC (${cpc:.2f}) is >50% of daily budget - review keyword bids",
+                "reason": f"CPC (${cpc:.2f}) is >50% of daily budget — review keyword bids",
                 "suggestion": "adjust_bids",
             })
 

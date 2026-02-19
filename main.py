@@ -1,5 +1,7 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v1.5.0 - Phase 4: Webhook fix, token refresh service, optimizer auto-actions,
+         Meta adset discovery, version management
 v1.4.0 - Phase 3: Shopify webhook registration, schema fixes, Google Ads hardening,
          scheduler heartbeat, version management
 v1.3.0 - Add: Shopify integration router with auto-refresh client_credentials tokens

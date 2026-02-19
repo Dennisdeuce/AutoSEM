@@ -380,6 +380,18 @@ def list_blog_posts():
 
 # ─── Webhooks ────────────────────────────────────────────────────
 
+@router.post("/register-webhook", summary="Manually register order webhook")
+def register_webhook_manual():
+    """Manually trigger Shopify orders/create webhook registration."""
+    try:
+        from app.services.shopify_webhook_register import register_webhooks_on_startup
+        result = register_webhooks_on_startup()
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        logger.error(f"Manual webhook registration failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 @router.get("/webhooks", summary="List registered Shopify webhooks")
 def list_registered_webhooks():
     """List all webhooks registered with Shopify for this app."""

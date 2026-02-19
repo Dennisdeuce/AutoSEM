@@ -287,6 +287,43 @@ class MetaAdsService:
             logger.error(f"Failed to fetch Meta Ads performance: {e}")
             return []
 
+    def get_adsets(self, campaign_id: str) -> List[Dict]:
+        """Get all ad sets for a campaign.
+        Calls GET /{campaign_id}/adsets?fields=id,name,daily_budget,status
+        """
+        if not self.is_configured:
+            return []
+
+        try:
+            params = {
+                "fields": "id,name,daily_budget,status",
+                **self._auth_params(),
+            }
+            data = self._api_get(f"{campaign_id}/adsets", params=params)
+            return data.get("data", [])
+        except Exception as e:
+            logger.error(f"Failed to fetch adsets for campaign {campaign_id}: {e}")
+            return []
+
+    def update_adset_budget(self, adset_id: str, new_budget_dollars: float) -> Dict:
+        """Update daily budget on an ad set.
+        Budget is sent in cents. Calls POST /{adset_id} with daily_budget={cents}.
+        """
+        if not self.is_configured:
+            return {"success": False, "error": "Meta not configured"}
+
+        try:
+            budget_cents = int(new_budget_dollars * 100)
+            data = self._api_post(adset_id, data={
+                "daily_budget": budget_cents,
+                **self._auth_params(),
+            })
+            logger.info(f"Updated adset {adset_id} budget to ${new_budget_dollars:.2f} ({budget_cents} cents)")
+            return {"success": True, "adset_id": adset_id, "new_budget": new_budget_dollars}
+        except Exception as e:
+            logger.error(f"Failed to update adset {adset_id} budget: {e}")
+            return {"success": False, "error": str(e)}
+
     def get_account_info(self) -> Dict:
         if not self.is_configured:
             return {"configured": False}

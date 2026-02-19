@@ -83,6 +83,19 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    # Refresh Shopify token every 20 hours (tokens expire in ~24h)
+    try:
+        from app.services.shopify_token import scheduled_token_refresh
+        scheduler.add_job(
+            scheduled_token_refresh,
+            trigger=IntervalTrigger(hours=20),
+            id="shopify_token_refresh",
+            name="Shopify Token Refresh",
+            replace_existing=True,
+        )
+    except Exception as e:
+        logger.warning(f"Shopify token refresh job not loaded: {e}")
+
     scheduler.start()
     logger.info("AutoSEM scheduler started")
 
