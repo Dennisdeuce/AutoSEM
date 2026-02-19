@@ -47,6 +47,7 @@ def create_app():
         ("app.routers.shopify", "/api/v1/shopify", "Shopify"),
         ("app.routers.google_ads", "/api/v1/google", "Google Ads"),
         ("app.routers.klaviyo", "/api/v1/klaviyo", "Klaviyo"),
+        ("app.routers.health", "/api/v1/health", "Health"),
     ]
 
     routers_loaded = []

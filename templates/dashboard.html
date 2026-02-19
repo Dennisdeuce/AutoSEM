@@ -110,8 +110,10 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
 <div class="tabs">
   <div class="tab active" data-tab="overview">Overview</div>
   <div class="tab" data-tab="meta">Meta Ads</div>
+  <div class="tab" data-tab="klaviyo">Klaviyo</div>
   <div class="tab" data-tab="shopify">Shopify</div>
   <div class="tab" data-tab="seo">SEO & Content</div>
+  <div class="tab" data-tab="system">System Health</div>
   <div class="tab" data-tab="tasks">Task Tracker</div>
 </div>
 
@@ -160,6 +162,16 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
     <tbody id="metaRows"><tr><td colspan="7" class="loading">Loading Meta data</td></tr></tbody>
   </table>
   <div class="ins" id="metaInsight" style="display:none"></div>
+
+  <div style="font-size:15px;font-weight:600;margin:20px 0 12px;color:var(--dim)">Campaign Controls</div>
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+    <input type="text" id="metaCampaignId" placeholder="Campaign ID" style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px 12px;font-family:inherit;font-size:13px;width:220px">
+    <button onclick="metaCampaignAction('activate')" style="background:var(--green-bg);color:var(--green);border:1px solid rgba(63,185,80,0.3);padding:8px 14px;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer">Activate</button>
+    <button onclick="metaCampaignAction('pause')" style="background:var(--amber-bg);color:var(--amber);border:1px solid rgba(210,153,34,0.3);padding:8px 14px;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer">Pause</button>
+    <input type="number" id="metaBudget" placeholder="Budget ($)" min="1" step="1" style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px 12px;font-family:inherit;font-size:13px;width:120px">
+    <button onclick="metaSetBudget()" style="background:var(--blue-bg);color:var(--blue);border:1px solid rgba(88,166,255,0.3);padding:8px 14px;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer">Set Budget</button>
+    <span id="metaActionResult" style="font-size:12px;color:var(--dim)"></span>
+  </div>
 </div>
 
 <!-- ═══════════════ SHOPIFY TAB ═══════════════ -->
@@ -208,6 +220,55 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
     <div class="chk"><span class="ic">⚠️</span> <strong>No JSON-LD Product schema</strong> — Google rich results (price, stars) won't display</div>
     <div class="chk"><span class="ic">⚠️</span> <strong>Generic URL handles</strong> — /products/mens-performance-crew-neck-tennis-t-shirt-5</div>
     <div class="chk"><span class="ic">⚠️</span> <strong>Collection page 1.3MB</strong> — 243 images, needs lazy loading</div>
+  </div>
+</div>
+
+<!-- ═══════════════ KLAVIYO TAB ═══════════════ -->
+<div class="tab-panel" id="panel-klaviyo">
+  <div class="grid" id="klaviyoCards">
+    <div class="card"><div class="lbl">Connection</div><div class="val" id="kl-status">--</div><div class="note" id="kl-status-note"></div></div>
+    <div class="card"><div class="lbl">Flows</div><div class="val b" id="kl-flows">--</div><div class="note">Active + draft</div></div>
+    <div class="card"><div class="lbl">Email Metrics</div><div class="val g" id="kl-metrics">--</div><div class="note">Tracked events</div></div>
+    <div class="card"><div class="lbl">Profiles</div><div class="val" id="kl-profiles">--</div><div class="note">Subscribers</div></div>
+  </div>
+
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <span style="font-size:15px;font-weight:600;color:var(--dim)">Flows</span>
+    <button onclick="createAbandonedCartFlow()" style="background:var(--green-bg);color:var(--green);border:1px solid rgba(63,185,80,0.3);padding:6px 14px;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer">+ Create Abandoned Cart Flow</button>
+  </div>
+  <table class="tbl">
+    <thead><tr><th>Flow Name</th><th>Status</th><th>Trigger</th><th>Updated</th></tr></thead>
+    <tbody id="klaviyoFlowRows"><tr><td colspan="4" class="loading">Loading Klaviyo data</td></tr></tbody>
+  </table>
+  <div id="klaviyoFlowResult" style="display:none" class="ins good"></div>
+</div>
+
+<!-- ═══════════════ SYSTEM HEALTH TAB ═══════════════ -->
+<div class="tab-panel" id="panel-system">
+  <div class="grid" id="healthCards">
+    <div class="card"><div class="lbl">Overall</div><div class="val g" id="h-overall">--</div></div>
+    <div class="card"><div class="lbl">Database</div><div class="val" id="h-db">--</div></div>
+    <div class="card"><div class="lbl">Scheduler</div><div class="val" id="h-scheduler">--</div></div>
+    <div class="card"><div class="lbl">Issues</div><div class="val" id="h-issues">--</div></div>
+  </div>
+
+  <div style="font-size:15px;font-weight:600;margin:8px 0 12px;color:var(--dim)">Service Status</div>
+  <div style="background:var(--surface);border-radius:12px;overflow:hidden" id="healthChecks">
+    <div class="chk"><span class="ic" id="hc-db">--</span> <span id="hc-db-text">Database</span></div>
+    <div class="chk"><span class="ic" id="hc-meta">--</span> <span id="hc-meta-text">Meta Token</span></div>
+    <div class="chk"><span class="ic" id="hc-tiktok">--</span> <span id="hc-tiktok-text">TikTok Token</span></div>
+    <div class="chk"><span class="ic" id="hc-shopify">--</span> <span id="hc-shopify-text">Shopify Token</span></div>
+    <div class="chk"><span class="ic" id="hc-klaviyo">--</span> <span id="hc-klaviyo-text">Klaviyo</span></div>
+    <div class="chk"><span class="ic" id="hc-sched">--</span> <span id="hc-sched-text">Scheduler</span></div>
+    <div class="chk"><span class="ic" id="hc-opt">--</span> <span id="hc-opt-text">Last Optimization</span></div>
+  </div>
+
+  <div style="font-size:15px;font-weight:600;margin:20px 0 12px;color:var(--dim)">Campaign & Financial Summary</div>
+  <div class="grid">
+    <div class="card"><div class="lbl">Total Campaigns</div><div class="val" id="h-campaigns">--</div><div class="note" id="h-campaigns-note"></div></div>
+    <div class="card"><div class="lbl">Total Spend</div><div class="val r" id="h-spend">--</div></div>
+    <div class="card"><div class="lbl">Total Revenue</div><div class="val g" id="h-revenue">--</div></div>
+    <div class="card"><div class="lbl">Overall ROAS</div><div class="val b" id="h-roas">--</div></div>
   </div>
 </div>
 
@@ -510,9 +571,176 @@ async function refreshToken() {
   } catch(e) { showError('Token refresh failed: ' + e.message); }
 }
 
+// ─── Meta Campaign Controls ───
+async function metaCampaignAction(action) {
+  const id = $('metaCampaignId').value.trim();
+  if (!id) { $('metaActionResult').textContent = 'Enter a campaign ID'; return; }
+  try {
+    const resp = await fetch(API + '/meta/' + action + '-campaign', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({campaign_id: id})
+    });
+    const data = await resp.json();
+    $('metaActionResult').textContent = data.status === action.replace('activate','activated').replace('pause','paused') ? action + 'd successfully' : (data.message || 'Failed');
+    $('metaActionResult').style.color = data.status === 'error' ? 'var(--red)' : 'var(--green)';
+    loadMeta();
+  } catch(e) { $('metaActionResult').textContent = 'Error: ' + e.message; $('metaActionResult').style.color = 'var(--red)'; }
+}
+
+async function metaSetBudget() {
+  const id = $('metaCampaignId').value.trim();
+  const budget = parseInt($('metaBudget').value);
+  if (!id || !budget) { $('metaActionResult').textContent = 'Enter campaign ID and budget'; return; }
+  try {
+    const resp = await fetch(API + '/meta/set-budget', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({campaign_id: id, daily_budget_cents: budget * 100})
+    });
+    const data = await resp.json();
+    $('metaActionResult').textContent = data.status === 'updated' ? 'Budget set to $' + budget + '/day' : (data.message || 'Failed');
+    $('metaActionResult').style.color = data.status === 'error' ? 'var(--red)' : 'var(--green)';
+  } catch(e) { $('metaActionResult').textContent = 'Error: ' + e.message; $('metaActionResult').style.color = 'var(--red)'; }
+}
+
+// ─── Klaviyo ───
+async function loadKlaviyo() {
+  try {
+    const statusResp = await fetch(API + '/klaviyo/status');
+    const status = await statusResp.json();
+    if (status.connected) {
+      $('kl-status').textContent = 'Connected';
+      $('kl-status').className = 'val g';
+      $('kl-status-note').textContent = status.account_name || '';
+    } else {
+      $('kl-status').textContent = status.status === 'not_configured' ? 'Not Set' : 'Error';
+      $('kl-status').className = 'val ' + (status.status === 'not_configured' ? 'a' : 'r');
+      $('kl-status-note').textContent = status.message || '';
+      $('klaviyoFlowRows').innerHTML = '<tr><td colspan="4" style="color:var(--dim)">' + (status.message || 'Klaviyo not configured') + '</td></tr>';
+      return;
+    }
+
+    // Load flows
+    const flowsResp = await fetch(API + '/klaviyo/flows');
+    const flowsData = await flowsResp.json();
+    const flows = flowsData.flows || [];
+    $('kl-flows').textContent = flows.length;
+    let html = '';
+    flows.forEach(f => {
+      const statusColor = f.status === 'live' ? 'g' : f.status === 'draft' ? 'a' : 'r';
+      html += '<tr><td>' + (f.name||'—') + '</td><td class="mono ' + statusColor + '">' + (f.status||'—') + '</td><td>' + (f.trigger_type||'—') + '</td><td class="mono">' + (f.updated ? new Date(f.updated).toLocaleDateString() : '—') + '</td></tr>';
+    });
+    $('klaviyoFlowRows').innerHTML = html || '<tr><td colspan="4" style="color:var(--dim)">No flows found. Create an abandoned cart flow to get started.</td></tr>';
+
+    // Load metrics
+    const metricsResp = await fetch(API + '/klaviyo/metrics');
+    const metricsData = await metricsResp.json();
+    $('kl-metrics').textContent = metricsData.flow_count || metricsData.count || 0;
+
+    // Load profiles count
+    const profilesResp = await fetch(API + '/klaviyo/profiles?page_size=1');
+    const profilesData = await profilesResp.json();
+    $('kl-profiles').textContent = profilesData.count || 0;
+
+  } catch(e) {
+    $('kl-status').textContent = 'Offline';
+    $('kl-status').className = 'val r';
+    $('klaviyoFlowRows').innerHTML = '<tr><td colspan="4" style="color:var(--dim)">Could not reach Klaviyo API</td></tr>';
+  }
+}
+
+async function createAbandonedCartFlow() {
+  const result = $('klaviyoFlowResult');
+  result.style.display = 'block';
+  result.className = 'ins';
+  result.textContent = 'Creating abandoned cart flow...';
+  try {
+    const resp = await fetch(API + '/klaviyo/create-abandoned-cart-flow', { method: 'POST' });
+    const data = await resp.json();
+    if (data.status === 'created') {
+      result.className = 'ins good';
+      result.innerHTML = '<strong>Flow created!</strong> ' + (data.emails_created||0) + ' emails, discount code: ' + (data.discount_code||'none') + '. Review templates in Klaviyo UI.';
+      loadKlaviyo();
+    } else {
+      result.className = 'ins crit';
+      result.textContent = 'Failed: ' + (data.message || 'Unknown error');
+    }
+  } catch(e) {
+    result.className = 'ins crit';
+    result.textContent = 'Error: ' + e.message;
+  }
+}
+
+// ─── System Health ───
+async function loadDeepHealth() {
+  try {
+    const resp = await fetch(API + '/health/deep');
+    const data = await resp.json();
+    const c = data.checks || {};
+
+    $('h-overall').textContent = data.status === 'healthy' ? 'Healthy' : 'Degraded';
+    $('h-overall').className = 'val ' + (data.status === 'healthy' ? 'g' : 'a');
+    $('h-issues').textContent = (data.issues || []).length;
+    $('h-issues').className = 'val ' + ((data.issues||[]).length === 0 ? 'g' : 'a');
+
+    // DB
+    const db = c.database || {};
+    $('h-db').textContent = db.status === 'ok' ? 'OK' : 'Error';
+    $('h-db').className = 'val ' + (db.status === 'ok' ? 'g' : 'r');
+    $('hc-db').textContent = db.status === 'ok' ? '✅' : '❌';
+    $('hc-db-text').textContent = 'Database — ' + (db.engine || db.message || 'unknown');
+
+    // Scheduler
+    const sched = c.scheduler || {};
+    $('h-scheduler').textContent = sched.running ? 'Running' : 'Stopped';
+    $('h-scheduler').className = 'val ' + (sched.running ? 'g' : 'r');
+    $('hc-sched').textContent = sched.running ? '✅' : '❌';
+    $('hc-sched-text').textContent = 'Scheduler — ' + (sched.running ? sched.jobs + ' jobs' : (sched.message || 'stopped'));
+
+    // Meta
+    const meta = c.meta_token || {};
+    $('hc-meta').textContent = meta.present ? '✅' : '⚠️';
+    $('hc-meta-text').textContent = 'Meta Token — ' + (meta.present ? (meta.days_remaining != null ? meta.days_remaining + ' days left' : 'present') : 'not configured');
+
+    // TikTok
+    const tt = c.tiktok_token || {};
+    $('hc-tiktok').textContent = tt.present ? '✅' : '⚠️';
+    $('hc-tiktok-text').textContent = 'TikTok Token — ' + (tt.present ? 'configured' : 'not configured');
+
+    // Shopify
+    const sh = c.shopify_token || {};
+    $('hc-shopify').textContent = sh.status === 'ok' ? '✅' : '⚠️';
+    $('hc-shopify-text').textContent = 'Shopify Token — ' + (sh.status === 'ok' ? sh.ttl_hours + 'h remaining' : (sh.message || 'expired'));
+
+    // Klaviyo
+    const kl = c.klaviyo || {};
+    $('hc-klaviyo').textContent = kl.configured ? '✅' : '⚠️';
+    $('hc-klaviyo-text').textContent = 'Klaviyo — ' + (kl.configured ? 'configured' : 'not configured');
+
+    // Last optimization
+    const opt = c.last_optimization || {};
+    $('hc-opt').textContent = opt.timestamp ? '✅' : '⚠️';
+    $('hc-opt-text').textContent = 'Last Optimization — ' + (opt.timestamp ? new Date(opt.timestamp).toLocaleString() : 'never run');
+
+    // Campaigns
+    const camps = c.campaigns || {};
+    $('h-campaigns').textContent = camps.total || 0;
+    $('h-campaigns-note').textContent = (camps.active||0) + ' active, ' + (camps.paused||0) + ' paused, ' + (camps.draft||0) + ' draft';
+
+    // Financials
+    const fin = c.financials || {};
+    $('h-spend').textContent = '$' + fmt(fin.total_spend || 0);
+    $('h-revenue').textContent = '$' + fmt(fin.total_revenue || 0);
+    $('h-roas').textContent = fmt(fin.overall_roas || 0) + 'x';
+
+  } catch(e) {
+    $('h-overall').textContent = 'Error';
+    $('h-overall').className = 'val r';
+  }
+}
+
 // ─── Init ───
 async function refreshAll() {
-  await Promise.all([loadHealth(), loadMeta(), loadShopify()]);
+  await Promise.all([loadHealth(), loadMeta(), loadShopify(), loadKlaviyo(), loadDeepHealth()]);
   updateTime();
 }
 

@@ -39,7 +39,9 @@ class PerformanceSyncService:
         return results
 
     def _sync_meta(self) -> Dict:
-        """Pull Meta campaign performance and update local records."""
+        """Pull Meta campaign performance and update local records.
+        Wrapped with retry logic via the retry decorator on MetaAdsService methods.
+        """
         if not self.meta.is_configured:
             return {"status": "skipped", "reason": "Meta not configured"}
 

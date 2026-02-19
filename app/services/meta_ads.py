@@ -55,6 +55,32 @@ class MetaAdsService:
     def _headers(self) -> Dict:
         return {"Authorization": f"Bearer {self.access_token}"}
 
+    def _api_get(self, endpoint: str, params: Dict = None):
+        """Make a retried GET request to the Graph API."""
+        from app.services.retry import with_retry
+        import httpx
+
+        @with_retry(retries=3, backoff=1.0)
+        def _do():
+            resp = httpx.get(self._api_url(endpoint), params=params or {}, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+
+        return _do()
+
+    def _api_post(self, endpoint: str, data: Dict = None):
+        """Make a retried POST request to the Graph API."""
+        from app.services.retry import with_retry
+        import httpx
+
+        @with_retry(retries=3, backoff=1.0)
+        def _do():
+            resp = httpx.post(self._api_url(endpoint), data=data or {}, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+
+        return _do()
+
     def update_token(self, token: str):
         self.access_token = token
 
