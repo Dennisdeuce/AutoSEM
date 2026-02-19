@@ -20,7 +20,7 @@ No test framework configured. Use `/docs` Swagger UI for manual testing.
 
 ## Architecture
 
-**FastAPI** app (`main.py`) with 8 routers under `/api/v1/`:
+**FastAPI** app (`main.py` v1.3.0) with 9 routers under `/api/v1/`:
 
 | Router | Purpose |
 |--------|---------|
@@ -32,6 +32,7 @@ No test framework configured. Use `/docs` Swagger UI for manual testing.
 | `automation` | Optimization engine, scheduled cycles, performance sync |
 | `settings` | Spend limits, ROAS thresholds, emergency pause config |
 | `deploy` | GitHub webhook for auto-pull on push to main |
+| `shopify` | Shopify Admin API with auto-refresh client_credentials tokens |
 
 **Database:** SQLAlchemy with PostgreSQL (tables: products, campaigns, meta_tokens, tiktok_tokens, activity_logs, settings)
 
@@ -40,7 +41,7 @@ No test framework configured. Use `/docs` Swagger UI for manual testing.
 ## Key Files
 
 - `main.py` — FastAPI app factory, router registration, static files
-- `app/routers/` — All 8 API router modules
+- `app/routers/` — All 9 API router modules
 - `app/services/` — Business logic (meta_ads, google_ads, optimizer, campaign_generator)
 - `app/database.py` — SQLAlchemy models and session management
 - `app/schemas.py` — Pydantic request/response models
@@ -109,9 +110,44 @@ Currently live on Replit: only `status`, `connect`, `callback`, `refresh`.
 Campaign management endpoints (`activate`, `pause`, `set-budget`, `campaigns`) need
 a Replit redeploy to go live.
 
+### Shopify Router Endpoints (v1.3.0)
+
+Auto-refreshes tokens via `client_credentials` flow — no manual rotation needed.
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/api/v1/shopify/status` | Connection check + token validity |
+| GET | `/api/v1/shopify/products` | List all products (summary) |
+| GET | `/api/v1/shopify/products/{id}` | Full product details |
+| PUT | `/api/v1/shopify/products/{id}` | Update tags, description, title |
+| PUT | `/api/v1/shopify/products/{id}/tags` | Update tags only |
+| PUT | `/api/v1/shopify/products/{id}/description` | Update description only |
+| GET | `/api/v1/shopify/collections` | List smart + custom collections |
+| POST | `/api/v1/shopify/sync` | Sync all products to local DB |
+
+Requires Replit Secrets: `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_STORE`.
+
+## Planned: Klaviyo Integration (Abandoned Cart Flow)
+
+**Status:** Not yet implemented. Klaviyo is installed on court-sportswear.com (since Feb 13, 2026)
+but no API key is stored in AutoSEM and no router exists yet.
+
+**What's needed:**
+- `KLAVIYO_API_KEY` — Private API key from Klaviyo Settings → API Keys
+- New router: `app/routers/klaviyo.py`
+- 3-email abandoned cart sequence:
+  1. **1 hour after abandon:** "Did you forget something?" — cart items + product images
+  2. **24 hours:** "Still thinking it over?" — social proof + customer reviews
+  3. **48 hours:** "Last chance — here's 10% off" — discount code via Klaviyo coupon API
+- Klaviyo API docs: `https://developers.klaviyo.com/en/reference/api-overview`
+- Use Klaviyo Flows API to create the sequence programmatically, or configure
+  manually in Klaviyo UI and use the API for triggering/tracking only
+
 ## Environment Variables
 
-See Replit Secrets. Key vars: `DATABASE_URL`, `META_ACCESS_TOKEN`, `META_APP_SECRET`, `META_AD_ACCOUNT_ID`, `TIKTOK_ACCESS_TOKEN`, `TIKTOK_ADVERTISER_ID`, `SHOPIFY_STORE_URL`, `SHOPIFY_ACCESS_TOKEN`, `DEPLOY_KEY`.
+See Replit Secrets. Key vars: `DATABASE_URL`, `META_ACCESS_TOKEN`, `META_APP_SECRET`,
+`META_AD_ACCOUNT_ID`, `TIKTOK_ACCESS_TOKEN`, `TIKTOK_ADVERTISER_ID`,
+`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_STORE`, `DEPLOY_KEY`.
 
 ## Key Conventions
 
