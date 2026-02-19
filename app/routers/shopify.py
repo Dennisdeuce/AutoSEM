@@ -380,6 +380,30 @@ def list_blog_posts():
 
 # ─── Webhooks ────────────────────────────────────────────────────
 
+@router.get("/webhooks", summary="List registered Shopify webhooks")
+def list_registered_webhooks():
+    """List all webhooks registered with Shopify for this app."""
+    try:
+        from app.services.shopify_webhook_register import list_webhooks
+        webhooks = list_webhooks()
+        return {
+            "status": "ok",
+            "count": len(webhooks),
+            "webhooks": [
+                {
+                    "id": wh.get("id"),
+                    "topic": wh.get("topic"),
+                    "address": wh.get("address"),
+                    "created_at": wh.get("created_at"),
+                }
+                for wh in webhooks
+            ],
+        }
+    except Exception as e:
+        logger.error(f"Failed to list webhooks: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 @router.post("/webhook/order-created", summary="Order created webhook",
              description="Receive Shopify order webhook, attribute revenue to campaigns via UTM/referrer")
 def webhook_order_created(payload: dict, db: Session = Depends(get_db)):

@@ -53,6 +53,8 @@ class CampaignBase(BaseModel):
     revenue: Optional[float] = 0.0
     total_spend: Optional[float] = 0.0
     total_revenue: Optional[float] = 0.0
+    impressions: Optional[int] = 0
+    clicks: Optional[int] = 0
     conversions: Optional[int] = 0
     roas: Optional[float] = 0.0
     headlines: Optional[str] = None

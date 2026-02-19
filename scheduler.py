@@ -1,15 +1,36 @@
 """AutoSEM Scheduler
 Runs periodic optimization cycles and performance syncs.
+Writes heartbeat timestamps to SettingsModel after each job.
 """
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 logger = logging.getLogger("autosem.scheduler")
 
 scheduler = BackgroundScheduler()
+
+
+def _write_heartbeat(key: str):
+    """Write an ISO timestamp to SettingsModel for the given key."""
+    try:
+        from app.database import SessionLocal, SettingsModel
+        db = SessionLocal()
+        try:
+            setting = db.query(SettingsModel).filter(SettingsModel.key == key).first()
+            ts = datetime.now(timezone.utc).isoformat()
+            if setting:
+                setting.value = ts
+            else:
+                setting = SettingsModel(key=key, value=ts)
+                db.add(setting)
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Failed to write heartbeat '{key}': {e}")
 
 
 def run_optimization_cycle():
@@ -23,6 +44,8 @@ def run_optimization_cycle():
         logger.info(f"Optimization cycle result: {response.status_code}")
     except Exception as e:
         logger.error(f"Scheduled optimization failed: {e}")
+    finally:
+        _write_heartbeat("last_optimization")
 
 
 def sync_performance():
@@ -36,6 +59,8 @@ def sync_performance():
         logger.info(f"Performance sync result: {response.status_code}")
     except Exception as e:
         logger.error(f"Scheduled performance sync failed: {e}")
+    finally:
+        _write_heartbeat("last_sync_performance")
 
 
 def start_scheduler():

@@ -34,9 +34,19 @@ _automation_state = {
 
 
 @router.get("/status", summary="Get Automation Status",
-            description="Get current automation engine status")
-def get_automation_status() -> dict:
-    return _automation_state
+            description="Get current automation engine status including scheduler heartbeats")
+def get_automation_status(db: Session = Depends(get_db)) -> dict:
+    from app.database import SettingsModel
+
+    # Read heartbeat timestamps from DB
+    last_opt = db.query(SettingsModel).filter(SettingsModel.key == "last_optimization").first()
+    last_sync = db.query(SettingsModel).filter(SettingsModel.key == "last_sync_performance").first()
+
+    return {
+        **_automation_state,
+        "last_optimization": last_opt.value if last_opt else _automation_state.get("last_optimization"),
+        "last_sync_performance": last_sync.value if last_sync else None,
+    }
 
 
 @router.post("/start", summary="Start Automation",

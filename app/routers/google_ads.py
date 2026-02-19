@@ -63,9 +63,18 @@ def google_ads_status():
     }
 
 
+_NOT_CONFIGURED_RESP = {
+    "status": "not_configured",
+    "message": "Google Ads credentials not configured. Set GOOGLE_ADS_CUSTOMER_ID and GOOGLE_ADS_DEVELOPER_TOKEN environment variables.",
+}
+
+
 @router.get("/campaigns", summary="List Google Ads campaigns",
             description="Get all campaigns with performance metrics")
 def list_campaigns(days: int = Query(7, ge=1, le=90), db: Session = Depends(get_db)):
+    if not service.is_configured:
+        return _NOT_CONFIGURED_RESP
+
     try:
         campaigns = service.get_performance(days=days)
         return {
@@ -82,6 +91,9 @@ def list_campaigns(days: int = Query(7, ge=1, le=90), db: Session = Depends(get_
 @router.post("/activate-campaign", summary="Activate a Google Ads campaign",
              description="Enable a campaign via Google Ads API")
 def activate_campaign(req: CampaignActionRequest, db: Session = Depends(get_db)):
+    if not service.is_configured:
+        return _NOT_CONFIGURED_RESP
+
     try:
         result = service.enable_campaign(req.campaign_id)
         if result.get("success"):
@@ -109,6 +121,9 @@ def activate_campaign(req: CampaignActionRequest, db: Session = Depends(get_db))
 @router.post("/pause-campaign", summary="Pause a Google Ads campaign",
              description="Pause a campaign via Google Ads API")
 def pause_campaign(req: CampaignActionRequest, db: Session = Depends(get_db)):
+    if not service.is_configured:
+        return _NOT_CONFIGURED_RESP
+
     try:
         result = service.pause_campaign(req.campaign_id)
         if result.get("success"):
@@ -136,6 +151,9 @@ def pause_campaign(req: CampaignActionRequest, db: Session = Depends(get_db)):
 @router.post("/set-budget", summary="Set campaign daily budget",
              description="Update daily budget on a Google Ads campaign (in dollars)")
 def set_campaign_budget(req: SetBudgetRequest, db: Session = Depends(get_db)):
+    if not service.is_configured:
+        return _NOT_CONFIGURED_RESP
+
     try:
         result = service.update_campaign_budget(req.campaign_id, req.daily_budget)
         if result.get("success"):
@@ -162,6 +180,9 @@ def set_campaign_budget(req: SetBudgetRequest, db: Session = Depends(get_db)):
 @router.post("/create-campaign", summary="Create a new Google Ads campaign",
              description="Create a new search campaign via Google Ads API")
 def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
+    if not service.is_configured:
+        return _NOT_CONFIGURED_RESP
+
     try:
         config = {
             "campaign_name": req.campaign_name,
@@ -195,6 +216,9 @@ def get_performance(
     campaign_id: str = Query(None, description="Specific campaign ID (omit for all)"),
     days: int = Query(7, ge=1, le=90, description="Number of days to look back"),
 ):
+    if not service.is_configured:
+        return _NOT_CONFIGURED_RESP
+
     try:
         data = service.get_performance(external_id=campaign_id, days=days)
         return {
