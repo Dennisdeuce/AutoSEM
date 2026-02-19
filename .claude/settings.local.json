@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git pull:*)",
+      "Bash(git -C \"C:/Users/denni/Documents/AutoSEM-dev/AutoSEM\" pull)",
+      "Bash(GIT_DIR=\"C:/Users/denni/Documents/AutoSEM-dev/AutoSEM/.git\" git pull:*)",
+      "Bash(HOME=/c/Users/denni git pull:*)",
+      "Bash(TMPDIR=/tmp git pull:*)",
+      "Bash(git --version:*)",
+      "Bash(curl:*)",
+      "Bash(git -C /c/users/denni/documents/autosem-dev/autosem log --oneline -10)",
+      "Bash(git -C /c/users/denni/documents/autosem-dev/autosem log origin/main --oneline -15)",
+      "Bash(python -c:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}

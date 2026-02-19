@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     GOOGLE_ADS_REFRESH_TOKEN: str = ""
     GOOGLE_ADS_CUSTOMER_ID: str = ""
 
+    # Klaviyo
+    KLAVIYO_API_KEY: str = ""
+
     # Meta Ads
     META_APP_ID: str = ""
     META_APP_SECRET: str = ""

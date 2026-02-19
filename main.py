@@ -45,6 +45,8 @@ def create_app():
         ("app.routers.automation", "/api/v1/automation", "Automation"),
         ("app.routers.deploy", "/api/v1/deploy", "Deploy"),
         ("app.routers.shopify", "/api/v1/shopify", "Shopify"),
+        ("app.routers.google_ads", "/api/v1/google", "Google Ads"),
+        ("app.routers.klaviyo", "/api/v1/klaviyo", "Klaviyo"),
     ]
 
     routers_loaded = []
