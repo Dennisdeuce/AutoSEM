@@ -1,6 +1,6 @@
-"""
-Meta Ads Service
+"""Meta Ads Service
 Manages Meta (Facebook/Instagram) ad campaigns and performance syncing.
+v1.1 - Added appsecret_proof (HMAC-SHA256) for all Graph API calls
 """
 import os
 import hmac
@@ -32,11 +32,12 @@ class MetaAdsService:
     def _api_url(self, endpoint: str) -> str:
         return f"{self.BASE_URL}/{self.API_VERSION}/{endpoint}"
 
-    def _headers(self) -> Dict:
-        return {"Authorization": f"Bearer {self.access_token}"}
-
     def _compute_proof(self) -> str:
-        """Compute appsecret_proof: HMAC-SHA256 of access_token with app_secret."""
+        """Bug 6 fix: Compute appsecret_proof = HMAC-SHA256(access_token, app_secret).
+        Required by Meta Graph API when appsecret_proof is enforced.
+        """
+        if not self.app_secret or not self.access_token:
+            return ""
         return hmac.new(
             self.app_secret.encode("utf-8"),
             self.access_token.encode("utf-8"),
@@ -44,11 +45,15 @@ class MetaAdsService:
         ).hexdigest()
 
     def _auth_params(self) -> Dict:
-        """Return access_token + appsecret_proof params for API calls."""
+        """Return auth params dict including appsecret_proof."""
         params = {"access_token": self.access_token}
-        if self.app_secret:
-            params["appsecret_proof"] = self._compute_proof()
+        proof = self._compute_proof()
+        if proof:
+            params["appsecret_proof"] = proof
         return params
+
+    def _headers(self) -> Dict:
+        return {"Authorization": f"Bearer {self.access_token}"}
 
     def update_token(self, token: str):
         self.access_token = token
@@ -300,6 +305,58 @@ class MetaAdsService:
         except Exception as e:
             logger.error(f"Failed to refresh Meta token: {e}")
             return None
+
+    def exchange_token(self, short_lived_token: str, db=None) -> Dict:
+        """Exchange a short-lived token for a long-lived one."""
+        if not self.app_id or not self.app_secret:
+            return {"error": "META_APP_ID and META_APP_SECRET required"}
+
+        try:
+            import httpx
+
+            response = httpx.get(
+                self._api_url("oauth/access_token"),
+                params={
+                    "grant_type": "fb_exchange_token",
+                    "client_id": self.app_id,
+                    "client_secret": self.app_secret,
+                    "fb_exchange_token": short_lived_token,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            new_token = data.get("access_token", "")
+            expires_in = data.get("expires_in", 0)
+
+            if new_token:
+                self.access_token = new_token
+                # Persist to DB if available
+                if db:
+                    from app.database import MetaTokenModel
+                    token_record = db.query(MetaTokenModel).first()
+                    if token_record:
+                        token_record.access_token = new_token
+                        token_record.expires_in = expires_in
+                        token_record.updated_at = datetime.utcnow()
+                    else:
+                        token_record = MetaTokenModel(
+                            access_token=new_token,
+                            expires_in=expires_in,
+                        )
+                        db.add(token_record)
+                    db.commit()
+
+                return {
+                    "token_exchanged": True,
+                    "expires_in": expires_in,
+                    "token_prefix": new_token[:12] + "...",
+                }
+
+            return {"error": "No token returned"}
+
+        except Exception as e:
+            logger.error(f"Token exchange failed: {e}")
+            return {"error": str(e)}
 
     def _simulate_create(self, config: Dict) -> Dict:
         import random

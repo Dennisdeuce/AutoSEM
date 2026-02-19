@@ -1,5 +1,4 @@
-"""
-AutoSEM Scheduler
+"""AutoSEM Scheduler
 Runs periodic optimization cycles and performance syncs.
 """
 import os
@@ -19,6 +18,7 @@ def run_optimization_cycle():
     try:
         import httpx
         base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
+        # Bug 5 fix: correct URL path with /api/v1/ prefix
         response = httpx.post(f"{base_url}/api/v1/automation/run-cycle", timeout=120)
         logger.info(f"Optimization cycle result: {response.status_code}")
     except Exception as e:
@@ -31,6 +31,7 @@ def sync_performance():
     try:
         import httpx
         base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
+        # Bug 5 fix: correct URL path with /api/v1/ prefix
         response = httpx.post(f"{base_url}/api/v1/automation/sync-performance", timeout=60)
         logger.info(f"Performance sync result: {response.status_code}")
     except Exception as e:

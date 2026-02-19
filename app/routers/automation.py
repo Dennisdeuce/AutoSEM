@@ -1,5 +1,4 @@
-"""
-Automation API router - Core orchestration engine
+"""Automation API router - Core orchestration engine
 Handles campaign creation, optimization, and lifecycle management
 """
 
@@ -44,7 +43,7 @@ def get_automation_status() -> dict:
              description="Start the automation engine")
 def start_automation() -> dict:
     _automation_state["is_running"] = True
-    logger.info("🟢 Automation engine started")
+    logger.info("\ud83d\udfe2 Automation engine started")
     return {"status": "started", "is_running": True}
 
 
@@ -52,7 +51,7 @@ def start_automation() -> dict:
              description="Stop the automation engine")
 def stop_automation() -> dict:
     _automation_state["is_running"] = False
-    logger.info("🔴 Automation engine stopped")
+    logger.info("\ud83d\udd34 Automation engine stopped")
     return {"status": "stopped", "is_running": False}
 
 
@@ -67,10 +66,11 @@ def run_automation_cycle(db: Session = Depends(get_db)) -> dict:
         "steps": [],
     }
 
+    # Bug 1 fix: pass db to constructors, call methods without db arg
     try:
         generator = CampaignGenerator(db)
         new_campaigns = generator.generate_campaigns()
-        results["steps"].append({"step": "create_campaigns", "created": new_campaigns})
+        results["steps"].append({"step": "create_campaigns", "created": len(new_campaigns)})
     except Exception as e:
         results["steps"].append({"step": "create_campaigns", "error": str(e)})
 
@@ -106,7 +106,7 @@ def create_campaigns(db: Session = Depends(get_db)) -> dict:
     generator = CampaignGenerator(db)
     try:
         created = generator.generate_campaigns()
-        return {"status": "success", "campaigns_created": created}
+        return {"status": "success", "campaigns_created": len(created), "campaigns": created}
     except Exception as e:
         logger.error(f"Campaign creation failed: {e}")
         return {"status": "error", "message": str(e)}
@@ -175,11 +175,12 @@ def push_campaigns_live(db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/sync-performance", summary="Sync Performance",
-             description="Sync performance data from all ad platforms")
+             description="Sync performance data from Meta and TikTok ad platforms")
 def sync_performance(db: Session = Depends(get_db)) -> dict:
-    from app.services.performance_sync import PerformanceSyncService
-    sync_service = PerformanceSyncService(db)
+    """Bug 2 fix: Use PerformanceSyncService instead of non-existent google_ads method."""
     try:
+        from app.services.performance_sync import PerformanceSyncService
+        sync_service = PerformanceSyncService(db)
         result = sync_service.sync_all()
         return {"status": "success", **result}
     except Exception as e:
@@ -214,11 +215,11 @@ def _check_safety_limits(db: Session) -> dict:
         for c in campaigns:
             c.status = "PAUSED"
         db.commit()
-        logger.critical(f"🚨 EMERGENCY PAUSE: Net loss ${net_loss:.2f} exceeds ${emergency_limit}")
+        logger.critical(f"\ud83d\udea8 EMERGENCY PAUSE: Net loss ${net_loss:.2f} exceeds ${emergency_limit}")
         return {"action": "EMERGENCY_PAUSE", "net_loss": net_loss}
 
     if total_spend >= daily_limit:
-        logger.warning(f"⚠️ Daily spend limit reached: ${total_spend:.2f} >= ${daily_limit}")
+        logger.warning(f"\u26a0\ufe0f Daily spend limit reached: ${total_spend:.2f} >= ${daily_limit}")
         return {"action": "DAILY_LIMIT_REACHED", "spend": total_spend}
 
     return {"action": "OK", "spend": total_spend, "limit": daily_limit}
