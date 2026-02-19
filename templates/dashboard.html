@@ -100,6 +100,7 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
   <div class="hdr-right">
     <div class="hdr-pill live"><span class="dot"></span> <span id="healthStatus">Connecting...</span></div>
     <div class="hdr-pill ver" id="versionPill">v--</div>
+    <span id="lastSync" style="font-family:'IBM Plex Mono';font-size:11px;color:var(--dim)">Last sync: —</span>
     <span id="lastUpdate">—</span>
   </div>
 </div>
@@ -158,8 +159,8 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
     <button onclick="syncMeta()" style="background:var(--blue-bg);color:var(--blue);border:1px solid rgba(88,166,255,0.3);padding:6px 14px;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer">↻ Sync Now</button>
   </div>
   <table class="tbl" id="metaTable">
-    <thead><tr><th>Campaign</th><th>Status</th><th>Spend</th><th>Clicks</th><th>CTR</th><th>CPC</th><th>Signal</th></tr></thead>
-    <tbody id="metaRows"><tr><td colspan="7" class="loading">Loading Meta data</td></tr></tbody>
+    <thead><tr><th>Campaign</th><th>Status</th><th>Spend</th><th>Clicks</th><th>CTR</th><th>CPC</th><th>ROAS</th><th>Signal</th></tr></thead>
+    <tbody id="metaRows"><tr><td colspan="8" class="loading">Loading Meta data</td></tr></tbody>
   </table>
   <div class="ins" id="metaInsight" style="display:none"></div>
 
@@ -262,6 +263,17 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
     <div class="chk"><span class="ic" id="hc-sched">--</span> <span id="hc-sched-text">Scheduler</span></div>
     <div class="chk"><span class="ic" id="hc-opt">--</span> <span id="hc-opt-text">Last Optimization</span></div>
   </div>
+
+  <div style="font-size:15px;font-weight:600;margin:20px 0 12px;color:var(--dim)">Shopify Scopes</div>
+  <div style="background:var(--surface);border-radius:12px;overflow:hidden;margin-bottom:20px;padding:14px 18px" id="shopifyScopesBox">
+    <span style="color:var(--dim);font-size:13px">Loading scopes...</span>
+  </div>
+
+  <div style="font-size:15px;font-weight:600;margin:20px 0 12px;color:var(--dim)">Recent Activity Log</div>
+  <table class="tbl">
+    <thead><tr><th>Time</th><th>Action</th><th>Details</th></tr></thead>
+    <tbody id="activityLogRows"><tr><td colspan="3" class="loading">Loading activity log</td></tr></tbody>
+  </table>
 
   <div style="font-size:15px;font-weight:600;margin:20px 0 12px;color:var(--dim)">Campaign & Financial Summary</div>
   <div class="grid">
@@ -380,25 +392,28 @@ async function loadMeta() {
     $('m-ctr').textContent = fmt(s.avg_ctr) + '%';
     $('m-cpc').textContent = '$' + fmt(s.avg_cpc);
 
-    // Campaign rows
+    // Campaign rows (with ROAS column)
     let html = '';
     campaigns.forEach(c => {
-      const isGood = c.cpc < 0.50;
       const signal = c.cpc < 0.20 ? '<span class="g">★ Star performer</span>' :
                      c.cpc < 0.50 ? '<span class="a">● Acceptable</span>' :
                      '<span class="r">▼ Review / pause</span>';
       const statusColor = c.status === 'ACTIVE' ? 'g' : 'r';
+      const roas = (c.spend && c.spend > 0 && c.revenue) ? (c.revenue / c.spend) : 0;
+      const roasDisplay = roas > 0 ? fmt(roas) + 'x' : '<span style="color:var(--dim)">No revenue yet</span>';
+      const roasColor = roas >= 2 ? 'g' : roas >= 1 ? 'a' : roas > 0 ? 'r' : '';
       html += `<tr>
-        <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.name}</td>
+        <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.name}</td>
         <td class="mono ${statusColor}">${c.status}</td>
         <td class="mono">$${fmt(c.spend)}</td>
         <td class="mono">${c.clicks}</td>
         <td class="mono ${c.ctr > 3 ? 'g' : c.ctr > 1 ? 'a' : 'r'}">${fmt(c.ctr)}%</td>
         <td class="mono ${c.cpc < 0.20 ? 'g' : c.cpc < 0.50 ? 'a' : 'r'}">$${fmt(c.cpc)}</td>
+        <td class="mono ${roasColor}">${roasDisplay}</td>
         <td>${signal}</td>
       </tr>`;
     });
-    $('metaRows').innerHTML = html || '<tr><td colspan="7" style="color:var(--dim)">No campaigns found</td></tr>';
+    $('metaRows').innerHTML = html || '<tr><td colspan="8" style="color:var(--dim)">No campaigns found</td></tr>';
 
     // Meta insight
     const best = campaigns.reduce((a,b) => (a.ctr||0) > (b.ctr||0) ? a : b, {});
@@ -474,37 +489,29 @@ async function loadShopify() {
       $('sh-status').textContent = 'Pending';
       $('sh-status').className = 'val a';
       $('sh-store').textContent = 'Router deploying...';
-      $('shopifyRows').innerHTML = '<tr><td colspan="4" style="color:var(--dim)">Shopify router not yet deployed. Waiting for AutoSEM v1.3.0.</td></tr>';
+      $('shopifyRows').innerHTML = '<tr><td colspan="4" style="color:var(--dim)">Shopify router not yet deployed.</td></tr>';
 
-      // Set reasonable defaults from known data
-      $('ov-products').textContent = '23';
-      $('ov-products-note').textContent = 'CRO: 23/23';
-      $('ov-collections').textContent = '6';
-      $('ov-collections-note').textContent = '4 smart, 2 custom';
-      $('ov-token').textContent = '—';
-      $('ov-token').className = 'val a';
-      $('ov-token-note').textContent = 'Router pending';
-      $('seo-cro').textContent = '23/23';
-      $('seo-meta').textContent = '23/23';
-
-      $('prog-products').style.width = '100%';
-      $('prog-products').textContent = '100% — 23/23 products';
-      $('prog-overall').style.width = '78%';
-      $('prog-overall').textContent = '78% — 18/23 items';
-      $('prog-email').style.width = '33%';
-      $('prog-email').textContent = '33% — Forms pending';
-      $('prog-tech').style.width = '80%';
-      $('prog-tech').textContent = '80% — JSON-LD pending';
+      // Try loading product count from campaigns/products API
+      try {
+        const prodResp = await fetch(API + '/products/');
+        if (prodResp.ok) {
+          const prods = await prodResp.json();
+          const total = Array.isArray(prods) ? prods.length : 0;
+          $('ov-products').textContent = total;
+          $('ov-products-note').textContent = `From local DB`;
+          $('seo-cro').textContent = total + ' products';
+        } else {
+          $('ov-products').textContent = '—';
+          $('ov-products-note').textContent = 'API unavailable';
+        }
+      } catch(pe) {
+        $('ov-products').textContent = '—';
+      }
     }
   } catch(e) {
-    $('shopifyRows').innerHTML = '<tr><td colspan="4" style="color:var(--dim)">Shopify router not available. Deploy v1.3.0 to enable.</td></tr>';
-    // Fallback defaults
-    $('ov-products').textContent = '23';
-    $('ov-products-note').textContent = 'CRO: 23/23';
-    $('prog-overall').style.width = '78%';
-    $('prog-overall').textContent = '78% — 18/23 items';
-    $('prog-products').style.width = '100%';
-    $('prog-products').textContent = '100% — 23/23';
+    $('shopifyRows').innerHTML = '<tr><td colspan="4" style="color:var(--dim)">Shopify router not available.</td></tr>';
+    $('ov-products').textContent = '—';
+    $('ov-products-note').textContent = 'Shopify offline';
   }
 }
 
@@ -738,9 +745,69 @@ async function loadDeepHealth() {
   }
 }
 
+// ─── Automation Status (Last Sync) ───
+async function loadAutomationStatus() {
+  try {
+    const resp = await fetch(API + '/automation/status');
+    const data = await resp.json();
+    const lastSync = data.last_sync_performance || data.last_optimization;
+    if (lastSync) {
+      $('lastSync').textContent = 'Last sync: ' + new Date(lastSync).toLocaleString();
+    }
+  } catch(e) {}
+}
+
+// ─── Activity Log ───
+async function loadActivityLog() {
+  try {
+    const resp = await fetch(API + '/automation/activity-log?limit=20');
+    const data = await resp.json();
+    const logs = data.logs || [];
+    let html = '';
+    logs.forEach(l => {
+      const ts = l.timestamp ? new Date(l.timestamp).toLocaleString() : '—';
+      const actionColor = l.action === 'AUTO_OPTIMIZE' ? 'b' : l.action.startsWith('EMERGENCY') ? 'r' : '';
+      html += `<tr>
+        <td class="mono" style="white-space:nowrap;font-size:12px">${ts}</td>
+        <td class="mono ${actionColor}" style="font-size:12px">${l.action}</td>
+        <td style="font-size:12px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.details || '—'}</td>
+      </tr>`;
+    });
+    $('activityLogRows').innerHTML = html || '<tr><td colspan="3" style="color:var(--dim)">No activity logged yet</td></tr>';
+  } catch(e) {
+    $('activityLogRows').innerHTML = '<tr><td colspan="3" style="color:var(--dim)">Could not load activity log</td></tr>';
+  }
+}
+
+// ─── Shopify Scopes ───
+async function loadShopifyScopes() {
+  try {
+    const resp = await fetch(API + '/shopify/status');
+    if (!resp.ok) { $('shopifyScopesBox').innerHTML = '<span style="color:var(--dim)">Shopify offline</span>'; return; }
+    const data = await resp.json();
+    const scopes = data.scopes || '';
+    if (!scopes) { $('shopifyScopesBox').innerHTML = '<span style="color:var(--dim)">No scopes data</span>'; return; }
+
+    const scopeList = scopes.split(',').map(s => s.trim());
+    const hasOrders = scopeList.some(s => s.includes('order'));
+    let html = '<div style="font-size:12px;display:flex;flex-wrap:wrap;gap:6px">';
+    scopeList.forEach(s => {
+      const isOrder = s.includes('order');
+      html += `<span style="padding:3px 8px;border-radius:6px;background:${isOrder ? 'var(--green-bg)' : 'var(--surface2)'};color:${isOrder ? 'var(--green)' : 'var(--dim)'};font-family:'IBM Plex Mono';font-size:11px">${s}</span>`;
+    });
+    html += '</div>';
+    if (!hasOrders) {
+      html += '<div style="margin-top:10px;padding:8px 12px;background:var(--amber-bg);border-radius:8px;font-size:12px;color:var(--amber)">⚠ Missing orders scope — webhook will not receive order data. Check Shopify app permissions.</div>';
+    }
+    $('shopifyScopesBox').innerHTML = html;
+  } catch(e) {
+    $('shopifyScopesBox').innerHTML = '<span style="color:var(--dim)">Could not load scopes</span>';
+  }
+}
+
 // ─── Init ───
 async function refreshAll() {
-  await Promise.all([loadHealth(), loadMeta(), loadShopify(), loadKlaviyo(), loadDeepHealth()]);
+  await Promise.all([loadHealth(), loadMeta(), loadShopify(), loadKlaviyo(), loadDeepHealth(), loadAutomationStatus(), loadActivityLog(), loadShopifyScopes()]);
   updateTime();
 }
 

@@ -5,7 +5,7 @@ Campaigns API router - Campaign CRUD operations
 import logging
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db, CampaignModel
@@ -18,6 +18,14 @@ router = APIRouter()
 @router.get("/", response_model=List[Campaign])
 def read_campaigns(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return db.query(CampaignModel).offset(skip).limit(limit).all()
+
+
+@router.get("/active", response_model=List[Campaign])
+def read_active_campaigns(db: Session = Depends(get_db)):
+    """Return only campaigns with status=active."""
+    return db.query(CampaignModel).filter(
+        CampaignModel.status.in_(["active", "ACTIVE", "live"])
+    ).all()
 
 
 @router.post("/", response_model=Campaign)

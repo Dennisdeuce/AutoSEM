@@ -1,5 +1,7 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v1.6.0 - Phase 5: Deploy webhook, campaign schema fix, dashboard polish,
+         activity log viewer, scheduler debug
 v1.5.0 - Phase 4: Webhook fix, token refresh service, optimizer auto-actions,
          Meta adset discovery, version management
 v1.4.0 - Phase 3: Shopify webhook registration, schema fixes, Google Ads hardening,

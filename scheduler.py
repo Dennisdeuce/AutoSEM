@@ -1,6 +1,7 @@
 """AutoSEM Scheduler
 Runs periodic optimization cycles and performance syncs.
 Writes heartbeat timestamps to SettingsModel after each job.
+Logs start/end of each job to ActivityLogModel.
 """
 import os
 import logging
@@ -33,34 +34,72 @@ def _write_heartbeat(key: str):
         logger.warning(f"Failed to write heartbeat '{key}': {e}")
 
 
+def _log_job_activity(action: str, details: str):
+    """Log a scheduler job event to ActivityLogModel."""
+    try:
+        from app.database import SessionLocal, ActivityLogModel
+        db = SessionLocal()
+        try:
+            log = ActivityLogModel(
+                action=action,
+                entity_type="scheduler",
+                entity_id="",
+                details=details,
+            )
+            db.add(log)
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Failed to log job activity: {e}")
+
+
 def run_optimization_cycle():
     """Execute a full optimization cycle."""
-    logger.info(f"[{datetime.utcnow().isoformat()}] Running scheduled optimization cycle")
+    ts = datetime.now(timezone.utc).isoformat()
+    logger.info(f"[{ts}] Starting scheduled optimization cycle")
+    _log_job_activity("SCHEDULER_JOB_START", "optimization_cycle started")
+
+    status = "ok"
+    error_msg = ""
     try:
         import httpx
         base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
-        # Bug 5 fix: correct URL path with /api/v1/ prefix
         response = httpx.post(f"{base_url}/api/v1/automation/run-cycle", timeout=120)
         logger.info(f"Optimization cycle result: {response.status_code}")
     except Exception as e:
+        status = "error"
+        error_msg = str(e)
         logger.error(f"Scheduled optimization failed: {e}")
     finally:
         _write_heartbeat("last_optimization")
+        end_ts = datetime.now(timezone.utc).isoformat()
+        _log_job_activity("SCHEDULER_JOB_END", f"optimization_cycle finished ({status}){': ' + error_msg if error_msg else ''}")
+        logger.info(f"[{end_ts}] Optimization cycle finished ({status})")
 
 
 def sync_performance():
     """Sync performance data from ad platforms."""
-    logger.info(f"[{datetime.utcnow().isoformat()}] Running scheduled performance sync")
+    ts = datetime.now(timezone.utc).isoformat()
+    logger.info(f"[{ts}] Starting scheduled performance sync")
+    _log_job_activity("SCHEDULER_JOB_START", "sync_performance started")
+
+    status = "ok"
+    error_msg = ""
     try:
         import httpx
         base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
-        # Bug 5 fix: correct URL path with /api/v1/ prefix
         response = httpx.post(f"{base_url}/api/v1/automation/sync-performance", timeout=60)
         logger.info(f"Performance sync result: {response.status_code}")
     except Exception as e:
+        status = "error"
+        error_msg = str(e)
         logger.error(f"Scheduled performance sync failed: {e}")
     finally:
         _write_heartbeat("last_sync_performance")
+        end_ts = datetime.now(timezone.utc).isoformat()
+        _log_job_activity("SCHEDULER_JOB_END", f"sync_performance finished ({status}){': ' + error_msg if error_msg else ''}")
+        logger.info(f"[{end_ts}] Performance sync finished ({status})")
 
 
 def start_scheduler():
@@ -97,7 +136,9 @@ def start_scheduler():
         logger.warning(f"Shopify token refresh job not loaded: {e}")
 
     scheduler.start()
-    logger.info("AutoSEM scheduler started")
+    job_count = len(scheduler.get_jobs())
+    logger.info(f"AutoSEM scheduler started with {job_count} jobs: " +
+                ", ".join(j.name for j in scheduler.get_jobs()))
 
 
 def stop_scheduler():

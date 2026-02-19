@@ -210,6 +210,34 @@ def update_meta_token(token_data: TokenUpdate, db: Session = Depends(get_db)) ->
         return {"status": "error", "message": str(e)}
 
 
+@router.get("/activity-log", summary="View activity log",
+            description="Get recent activity log entries, optionally filtered by action type")
+def get_activity_log(
+    limit: int = Query(50, ge=1, le=500),
+    action: str = Query(None, description="Filter by action type (e.g. AUTO_OPTIMIZE, AUTOMATION_CYCLE)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    query = db.query(ActivityLogModel).order_by(ActivityLogModel.timestamp.desc())
+    if action:
+        query = query.filter(ActivityLogModel.action == action)
+    logs = query.limit(limit).all()
+    return {
+        "status": "ok",
+        "count": len(logs),
+        "logs": [
+            {
+                "id": log.id,
+                "action": log.action,
+                "entity_type": log.entity_type,
+                "entity_id": log.entity_id,
+                "details": log.details,
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+            }
+            for log in logs
+        ],
+    }
+
+
 def _check_safety_limits(db: Session) -> dict:
     from app.routers.settings import _get_setting, DEFAULT_SETTINGS
 
