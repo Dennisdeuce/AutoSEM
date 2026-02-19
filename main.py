@@ -1,5 +1,6 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v1.3.0 - Add: Shopify integration router with auto-refresh client_credentials tokens
 v1.2.0 - Add: Campaign management, interest targeting, targeted campaigns
 v1.1.0 - Complete dashboard rebuild with TikTok metrics + aggregate top boxes
        - All routers registered (dashboard, meta, tiktok, campaigns, etc.)
@@ -19,7 +20,7 @@ def create_app():
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
 
-    app = FastAPI(title="AutoSEM", description="Autonomous SEM Platform", version="1.2.0")
+    app = FastAPI(title="AutoSEM", description="Autonomous SEM Platform", version="1.3.0")
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.isdir(static_dir):
@@ -43,6 +44,7 @@ def create_app():
         ("app.routers.settings", "/api/v1/settings", "Settings"),
         ("app.routers.automation", "/api/v1/automation", "Automation"),
         ("app.routers.deploy", "/api/v1/deploy", "Deploy"),
+        ("app.routers.shopify", "/api/v1/shopify", "Shopify"),
     ]
 
     routers_loaded = []
@@ -55,7 +57,7 @@ def create_app():
         except Exception as e:
             logger.warning(f"{tag} router not loaded: {e}")
 
-    logger.info(f"AutoSEM v1.2.0: Loaded routers: {', '.join(routers_loaded)}")
+    logger.info(f"AutoSEM v1.3.0: Loaded routers: {', '.join(routers_loaded)}")
 
     @app.get("/")
     def root():
