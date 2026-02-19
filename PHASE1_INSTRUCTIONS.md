@@ -1,62 +1,127 @@
-# AutoSEM Phase 1: Fix the Optimization Engine
+# PHASE 1 — Fix the Engine (Critical Path)
 
-Read through the codebase first, then fix these bugs IN ORDER. Do NOT break any existing working endpoints or the dashboard.
+Goal: Make the optimization loop actually work. After these fixes, AutoSEM can read real performance data, make real optimization decisions, and execute them against Meta Ads — automatically, on a schedule.
 
-## Bug 1: Constructor mismatches crash the optimizer
+**CRITICAL: Do NOT break the existing dashboard or API endpoints.**
 
-File: app/routers/automation.py
+---
 
-- run_automation_cycle() calls CampaignOptimizer() and CampaignGenerator() with no args
-- Both classes require db: Session in __init__
-- Fix: pass db to both constructors in run_automation_cycle(), run_optimization(), and create_campaigns()
+## Bug 1: Constructor mismatches in automation.py
 
-## Bug 2: sync-performance calls non-existent method
+**File:** `app/routers/automation.py`
 
-File: app/routers/automation.py
+`CampaignOptimizer()` and `CampaignGenerator()` are called without the required `db` argument in `run_automation_cycle()`, `run_optimization()`, and `create_campaigns()`.
 
-- sync_performance() calls google_ads.sync_performance(db) which doesn't exist
-- Create a new file: app/services/performance_sync.py
-- It should pull live data from Meta (use the meta_ads.py get_performance() method) and TikTok
-- Write impressions, clicks, spend, conversions, revenue to matching CampaignModel records
-- Also: discover real Meta campaigns that have no local CampaignModel record and create them
-- The 2 real Meta campaigns are: 120241759616260364 (Sales - PAUSED) and 120206746647300364 (Ongoing - ACTIVE)
-- Update the sync-performance endpoint to use the new PerformanceSyncService
+**Fix:** Change every `CampaignOptimizer()` to `CampaignOptimizer(db)` and every `CampaignGenerator()` to `CampaignGenerator(db)`.
 
-## Bug 3: Clean phantom Google Ads campaigns
+---
 
-- There are 45 CampaignModel records with platform='google_ads' and platform_campaign_id=NULL
-- These were never pushed to Google. Mark them all as status='draft' so the optimizer ignores them
-- Add a cleanup function that runs on startup or first sync
+## Bug 2: Build real performance sync service
 
-## Bug 4: Scheduler never starts
+**File:** Create `app/services/performance_sync.py` (NEW FILE)
 
-File: main.py
+The `sync-performance` endpoint calls `google_ads.sync_performance(db)` which doesn't exist. Need a real service that:
+- Pulls live data from Meta (use MetaAdsService().get_performance())
+- Pulls TikTok performance (use existing TikTok endpoints)
+- Writes impressions, clicks, spend, conversions, revenue back to matching CampaignModel records
+- Discovers & links real Meta campaigns that have no local CampaignModel record (match by platform_campaign_id)
+- The 2 real Meta campaigns are: `120241759616260364` (Sales) and `120206746647300364` (Ongoing)
 
-- Import start_scheduler from scheduler.py and call it after app creation
-- Add shutdown event to call stop_scheduler()
+**Then update** `app/routers/automation.py` sync-performance endpoint to use `PerformanceSyncService(db).sync_all()` instead of broken `google_ads.sync_performance(db)`.
 
-## Bug 5: Scheduler URL paths are wrong
+---
 
-File: scheduler.py
+## Bug 3: Wire up the scheduler in main.py
 
-- Change /api/automation/run-cycle to /api/v1/automation/run-cycle
-- Change /api/automation/sync-performance to /api/v1/automation/sync-performance
+**File:** `main.py`
 
-## Bug 6: Add appsecret_proof to Meta service
+`scheduler.py` exists with `start_scheduler()` function but it's never called. The 6h optimization and 2h sync jobs never execute.
 
-File: app/services/meta_ads.py
+**Fix:** In `create_app()`, after all routers are registered:
+```python
+from scheduler import start_scheduler, stop_scheduler
+start_scheduler()
 
-- All Graph API calls need HMAC-SHA256 of access_token with app_secret as appsecret_proof parameter
-- Add a _compute_proof() method and include it in every API request
+@app.on_event("shutdown")
+def shutdown_event():
+    stop_scheduler()
+```
 
-## Bug 7: Add Shopify order webhook for revenue tracking
+---
 
-File: app/routers/shopify.py
+## Bug 4: Fix scheduler URL paths
 
-- Add POST /api/v1/shopify/webhook/order-created endpoint
-- When an order comes in, extract UTM/referrer to attribute revenue to the correct campaign
-- Update CampaignModel.total_revenue
+**File:** `scheduler.py`
 
-## After all fixes
+Both `run_optimization_cycle()` and `sync_performance()` call `/api/automation/` but routes are at `/api/v1/automation/`.
 
-Commit and push to GitHub with a clear commit message. Do NOT attempt to deploy to Replit - that requires manual steps handled separately.
+**Fix:** Change:
+- `/api/automation/run-cycle` → `/api/v1/automation/run-cycle`
+- `/api/automation/sync-performance` → `/api/v1/automation/sync-performance`
+
+---
+
+## Bug 5: Add appsecret_proof to Meta service
+
+**File:** `app/services/meta_ads.py`
+
+All Meta Graph API calls need HMAC-SHA256 appsecret_proof. Without it, campaign creation and management calls fail.
+
+**Fix:** Add method:
+```python
+import hashlib, hmac
+
+def _compute_appsecret_proof(self) -> str:
+    return hmac.new(
+        self.app_secret.encode('utf-8'),
+        self.access_token.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+```
+
+Include `appsecret_proof` parameter in ALL Graph API calls (create_campaign, pause_campaign, enable_campaign, update_campaign_budget, get_performance, get_account_info, refresh_access_token).
+
+---
+
+## Bug 6: Add Shopify order webhook for revenue tracking
+
+**File:** `app/routers/shopify.py`
+
+No revenue tracking exists. CampaignModel.total_revenue is always 0.0, making ROAS permanently 0 and the optimizer blind.
+
+**Fix:** Add `POST /api/v1/shopify/webhook/order-created` endpoint that:
+- Receives Shopify order webhook payload
+- Extracts order total, UTM params from landing_site/referring_site
+- Attributes revenue to the correct campaign via UTM matching
+- Updates CampaignModel.total_revenue
+
+Register the webhook with Shopify Admin API during app startup or via a setup endpoint.
+
+---
+
+## Bug 7: Google Ads credentials validation
+
+**File:** `app/services/google_ads.py`
+
+Google Ads has no credentials configured (all empty strings). All operations fall to `_simulate_create`. The 81 phantom campaigns have been archived in the DB already, but the service needs proper handling.
+
+**Fix:** Add `is_configured` property check that returns False when credentials are empty. Ensure all methods gracefully handle unconfigured state without simulation — just return `{"status": "not_configured", "message": "Google Ads credentials not set"}`.
+
+---
+
+## Execution Order
+
+1. Bug 1 (constructor fix) — unblocks optimization
+2. Bug 2 (performance sync) — unblocks data flow
+3. Bug 3 + Bug 4 (scheduler) — enables automation
+4. Bug 5 (appsecret_proof) — enables Meta write operations
+5. Bug 6 (Shopify webhook) — enables revenue tracking
+6. Bug 7 (Google Ads cleanup) — prevents false data
+
+## After All Fixes
+
+```bash
+git add -A && git commit -m "Phase 1: Fix optimization engine - 7 critical bugs" && git push origin main
+```
+
+Then notify that the push is ready for deploy webhook + Replit redeploy.
