@@ -12,22 +12,26 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
 
-from app.database import get_db, ActivityLogModel
-from app.services.klaviyo_service import KlaviyoService
+from app.database import get_db, ActivityLogModel, SettingsModel
+from app.services.klaviyo_service import KlaviyoService, _get_klaviyo_key
 
 logger = logging.getLogger("AutoSEM.Klaviyo")
 router = APIRouter()
 
-KLAVIYO_API_KEY = os.environ.get("KLAVIYO_API_KEY", "")
 KLAVIYO_BASE_URL = "https://a.klaviyo.com/api"
 KLAVIYO_REVISION = "2024-10-15"
 
 service = KlaviyoService()
 
 
+def _get_api_key() -> str:
+    """Get the current Klaviyo API key (env or DB)."""
+    return _get_klaviyo_key()
+
+
 def _klaviyo_headers():
     return {
-        "Authorization": f"Klaviyo-API-Key {KLAVIYO_API_KEY}",
+        "Authorization": f"Klaviyo-API-Key {_get_api_key()}",
         "revision": KLAVIYO_REVISION,
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -69,12 +73,51 @@ class TriggerFlowRequest(BaseModel):
     properties: Optional[dict] = None
 
 
+class SetKeyRequest(BaseModel):
+    api_key: str
+
+
 # ─── Endpoints ───────────────────────────────────────────────────
+
+@router.post("/set-key", summary="Set Klaviyo API key",
+             description="Store Klaviyo API key in DB (survives restarts, no env var needed)")
+def set_klaviyo_key(req: SetKeyRequest, db: Session = Depends(get_db)):
+    try:
+        row = db.query(SettingsModel).filter(SettingsModel.key == "klaviyo_api_key").first()
+        if row:
+            row.value = req.api_key
+        else:
+            row = SettingsModel(key="klaviyo_api_key", value=req.api_key)
+            db.add(row)
+        db.commit()
+
+        # Reload the service instance so subsequent calls use the new key
+        service.reload_key()
+
+        # Quick validation — try to hit the accounts endpoint
+        connected = False
+        try:
+            _klaviyo_request("GET", "/accounts/")
+            connected = True
+        except Exception:
+            pass
+
+        return {
+            "status": "ok",
+            "message": "Klaviyo API key saved",
+            "connected": connected,
+        }
+    except Exception as e:
+        logger.error(f"Failed to set Klaviyo key: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+
 
 @router.get("/status", summary="Check Klaviyo status",
             description="Validate API key by fetching account info")
 def klaviyo_status():
-    if not KLAVIYO_API_KEY:
+    if not _get_api_key():
         return {
             "status": "not_configured",
             "connected": False,
@@ -105,7 +148,7 @@ def klaviyo_status():
 @router.get("/flows", summary="List all flows",
             description="Get all Klaviyo flows (abandoned cart, welcome, etc.)")
 def list_flows():
-    if not KLAVIYO_API_KEY:
+    if not _get_api_key():
         return {"status": "error", "message": "KLAVIYO_API_KEY not set"}
 
     try:
@@ -134,7 +177,7 @@ def list_flows():
 @router.get("/flows/{flow_id}", summary="Get flow details",
             description="Get details and action steps for a specific flow")
 def get_flow(flow_id: str):
-    if not KLAVIYO_API_KEY:
+    if not _get_api_key():
         return {"status": "error", "message": "KLAVIYO_API_KEY not set"}
 
     try:
@@ -169,7 +212,7 @@ def get_flow(flow_id: str):
 @router.get("/metrics", summary="Get email performance metrics",
             description="Get flow metrics including opens, clicks, revenue")
 def get_metrics():
-    if not KLAVIYO_API_KEY:
+    if not _get_api_key():
         return {"status": "error", "message": "KLAVIYO_API_KEY not set"}
 
     try:
@@ -185,7 +228,7 @@ def get_metrics():
 @router.get("/profiles", summary="List recent profiles",
             description="Get recent profiles/subscribers from Klaviyo")
 def list_profiles(page_size: int = Query(20, ge=1, le=100)):
-    if not KLAVIYO_API_KEY:
+    if not _get_api_key():
         return {"status": "error", "message": "KLAVIYO_API_KEY not set"}
 
     try:

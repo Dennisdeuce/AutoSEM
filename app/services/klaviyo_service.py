@@ -22,6 +22,27 @@ SHOPIFY_CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID", "")
 SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
 
 
+def _get_klaviyo_key() -> str:
+    """Get Klaviyo API key from env var, falling back to SettingsModel in DB."""
+    key = os.environ.get("KLAVIYO_API_KEY", "")
+    if key:
+        return key
+
+    try:
+        from app.database import SessionLocal, SettingsModel
+        db = SessionLocal()
+        try:
+            row = db.query(SettingsModel).filter(SettingsModel.key == "klaviyo_api_key").first()
+            if row and row.value:
+                return row.value
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Failed to read klaviyo_api_key from DB: {e}")
+
+    return ""
+
+
 class KlaviyoService:
     """Manages Klaviyo flows, events, and abandoned cart sequences."""
 
@@ -51,7 +72,11 @@ class KlaviyoService:
     ]
 
     def __init__(self):
-        self.api_key = KLAVIYO_API_KEY
+        self.api_key = _get_klaviyo_key()
+
+    def reload_key(self):
+        """Reload API key from env/DB (call after set-key)."""
+        self.api_key = _get_klaviyo_key()
 
     @property
     def is_configured(self) -> bool:

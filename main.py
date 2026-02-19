@@ -1,5 +1,7 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v1.7.0 - Phase 7: Shopify app TOML, Klaviyo DB fallback, JSON-LD structured
+         data, XML sitemap generator, SEO router
 v1.6.0 - Phase 5: Deploy webhook, campaign schema fix, dashboard polish,
          activity log viewer, scheduler debug
 v1.5.0 - Phase 4: Webhook fix, token refresh service, optimizer auto-actions,
@@ -55,6 +57,7 @@ def create_app():
         ("app.routers.shopify", "/api/v1/shopify", "Shopify"),
         ("app.routers.google_ads", "/api/v1/google", "Google Ads"),
         ("app.routers.klaviyo", "/api/v1/klaviyo", "Klaviyo"),
+        ("app.routers.seo", "/api/v1/seo", "SEO"),
         ("app.routers.health", "/api/v1/health", "Health"),
     ]
 
