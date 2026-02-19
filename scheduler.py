@@ -19,7 +19,7 @@ def run_optimization_cycle():
     try:
         import httpx
         base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
-        response = httpx.post(f"{base_url}/api/automation/run-cycle", timeout=120)
+        response = httpx.post(f"{base_url}/api/v1/automation/run-cycle", timeout=120)
         logger.info(f"Optimization cycle result: {response.status_code}")
     except Exception as e:
         logger.error(f"Scheduled optimization failed: {e}")
@@ -31,7 +31,7 @@ def sync_performance():
     try:
         import httpx
         base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
-        response = httpx.post(f"{base_url}/api/automation/sync-performance", timeout=60)
+        response = httpx.post(f"{base_url}/api/v1/automation/sync-performance", timeout=60)
         logger.info(f"Performance sync result: {response.status_code}")
     except Exception as e:
         logger.error(f"Scheduled performance sync failed: {e}")

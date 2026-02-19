@@ -68,15 +68,15 @@ def run_automation_cycle(db: Session = Depends(get_db)) -> dict:
     }
 
     try:
-        generator = CampaignGenerator()
-        new_campaigns = generator.create_for_uncovered_products(db)
+        generator = CampaignGenerator(db)
+        new_campaigns = generator.generate_campaigns()
         results["steps"].append({"step": "create_campaigns", "created": new_campaigns})
     except Exception as e:
         results["steps"].append({"step": "create_campaigns", "error": str(e)})
 
     try:
-        optimizer = CampaignOptimizer()
-        optimizations = optimizer.optimize_all(db)
+        optimizer = CampaignOptimizer(db)
+        optimizations = optimizer.optimize_all()
         results["steps"].append({"step": "optimize", "actions": optimizations})
     except Exception as e:
         results["steps"].append({"step": "optimize", "error": str(e)})
@@ -103,9 +103,9 @@ def run_automation_cycle(db: Session = Depends(get_db)) -> dict:
 @router.post("/create-campaigns", summary="Create Campaigns",
              description="Create AI-powered campaigns for products without campaigns")
 def create_campaigns(db: Session = Depends(get_db)) -> dict:
-    generator = CampaignGenerator()
+    generator = CampaignGenerator(db)
     try:
-        created = generator.create_for_uncovered_products(db)
+        created = generator.generate_campaigns()
         return {"status": "success", "campaigns_created": created}
     except Exception as e:
         logger.error(f"Campaign creation failed: {e}")
@@ -115,9 +115,9 @@ def create_campaigns(db: Session = Depends(get_db)) -> dict:
 @router.post("/optimize", summary="Run Optimization",
              description="Run optimization on all active campaigns")
 def run_optimization(db: Session = Depends(get_db)) -> dict:
-    optimizer = CampaignOptimizer()
+    optimizer = CampaignOptimizer(db)
     try:
-        results = optimizer.optimize_all(db)
+        results = optimizer.optimize_all()
         return {"status": "success", "optimizations": results}
     except Exception as e:
         logger.error(f"Optimization failed: {e}")
@@ -175,11 +175,12 @@ def push_campaigns_live(db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/sync-performance", summary="Sync Performance",
-             description="Sync performance data from Google Ads")
+             description="Sync performance data from all ad platforms")
 def sync_performance(db: Session = Depends(get_db)) -> dict:
-    google_ads = GoogleAdsService()
+    from app.services.performance_sync import PerformanceSyncService
+    sync_service = PerformanceSyncService(db)
     try:
-        result = google_ads.sync_performance(db)
+        result = sync_service.sync_all()
         return {"status": "success", **result}
     except Exception as e:
         logger.error(f"Performance sync failed: {e}")

@@ -376,3 +376,105 @@ def list_blog_posts():
             })
 
     return {"status": "ok", "count": len(all_posts), "posts": all_posts}
+
+
+# ─── Webhooks ────────────────────────────────────────────────────
+
+@router.post("/webhook/order-created", summary="Order created webhook",
+             description="Receive Shopify order webhook, attribute revenue to campaigns via UTM/referrer")
+def webhook_order_created(payload: dict, db: Session = Depends(get_db)):
+    """
+    When an order comes in, extract UTM/referrer to attribute revenue
+    to the correct campaign and update CampaignModel.total_revenue.
+    """
+    from app.database import CampaignModel
+
+    order = payload.get("order", payload)  # Handle both wrapped and raw payloads
+    order_id = order.get("id", "unknown")
+    total_price = float(order.get("total_price", 0))
+
+    # Extract UTM params from landing_site or referring_site
+    landing_site = order.get("landing_site", "") or ""
+    referring_site = order.get("referring_site", "") or ""
+    source_url = landing_site or referring_site
+
+    # Parse UTM parameters
+    utm_source = ""
+    utm_campaign = ""
+    if "?" in source_url:
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(source_url)
+        params = parse_qs(parsed.query)
+        utm_source = params.get("utm_source", [""])[0]
+        utm_campaign = params.get("utm_campaign", [""])[0]
+
+    # Also check note_attributes for campaign tracking
+    for attr in order.get("note_attributes", []):
+        if attr.get("name") == "utm_campaign" and not utm_campaign:
+            utm_campaign = attr.get("value", "")
+        if attr.get("name") == "utm_source" and not utm_source:
+            utm_source = attr.get("value", "")
+
+    # Determine platform from utm_source
+    platform = None
+    if utm_source:
+        source_lower = utm_source.lower()
+        if "meta" in source_lower or "facebook" in source_lower or "fb" in source_lower or "instagram" in source_lower or "ig" in source_lower:
+            platform = "meta"
+        elif "google" in source_lower:
+            platform = "google_ads"
+        elif "tiktok" in source_lower:
+            platform = "tiktok"
+
+    # Try to match campaign by utm_campaign (could be campaign ID or name)
+    campaign = None
+    if utm_campaign:
+        campaign = db.query(CampaignModel).filter(
+            CampaignModel.platform_campaign_id == utm_campaign,
+        ).first()
+
+        if not campaign:
+            campaign = db.query(CampaignModel).filter(
+                CampaignModel.name.ilike(f"%{utm_campaign}%"),
+            ).first()
+
+    # Fallback: attribute to most recent active campaign on the matched platform
+    if not campaign and platform:
+        campaign = db.query(CampaignModel).filter(
+            CampaignModel.platform == platform,
+            CampaignModel.status.in_(["active", "ACTIVE", "live"]),
+        ).order_by(CampaignModel.updated_at.desc()).first()
+
+    attribution = {
+        "order_id": order_id,
+        "total_price": total_price,
+        "utm_source": utm_source,
+        "utm_campaign": utm_campaign,
+        "platform": platform,
+        "campaign_id": None,
+        "campaign_name": None,
+        "attributed": False,
+    }
+
+    if campaign and total_price > 0:
+        campaign.total_revenue = (campaign.total_revenue or 0) + total_price
+        campaign.revenue = (campaign.revenue or 0) + total_price
+        campaign.conversions = (campaign.conversions or 0) + 1
+        if campaign.total_spend and campaign.total_spend > 0:
+            campaign.roas = campaign.total_revenue / campaign.total_spend
+        campaign.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+        attribution["campaign_id"] = campaign.id
+        attribution["campaign_name"] = campaign.name
+        attribution["attributed"] = True
+
+        _log_activity(db, "SHOPIFY_ORDER_ATTRIBUTED", str(order_id),
+                      f"${total_price:.2f} attributed to campaign '{campaign.name}' "
+                      f"(source: {utm_source}, platform: {platform})")
+    else:
+        _log_activity(db, "SHOPIFY_ORDER_UNATTRIBUTED", str(order_id),
+                      f"${total_price:.2f} order could not be attributed "
+                      f"(source: {utm_source}, campaign: {utm_campaign})")
+
+    return {"status": "ok", "attribution": attribution}

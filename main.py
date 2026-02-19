@@ -71,6 +71,22 @@ def create_app():
             "timestamp": datetime.utcnow().isoformat(),
         }
 
+    # Start background scheduler
+    try:
+        from scheduler import start_scheduler, stop_scheduler
+
+        @app.on_event("startup")
+        def on_startup():
+            start_scheduler()
+            logger.info("Scheduler started")
+
+        @app.on_event("shutdown")
+        def on_shutdown():
+            stop_scheduler()
+            logger.info("Scheduler stopped")
+    except Exception as e:
+        logger.warning(f"Scheduler not loaded: {e}")
+
     @app.get("/health")
     def health():
         return {

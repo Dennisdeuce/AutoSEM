@@ -3,6 +3,8 @@ Meta Ads Service
 Manages Meta (Facebook/Instagram) ad campaigns and performance syncing.
 """
 import os
+import hmac
+import hashlib
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
@@ -33,6 +35,21 @@ class MetaAdsService:
     def _headers(self) -> Dict:
         return {"Authorization": f"Bearer {self.access_token}"}
 
+    def _compute_proof(self) -> str:
+        """Compute appsecret_proof: HMAC-SHA256 of access_token with app_secret."""
+        return hmac.new(
+            self.app_secret.encode("utf-8"),
+            self.access_token.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _auth_params(self) -> Dict:
+        """Return access_token + appsecret_proof params for API calls."""
+        params = {"access_token": self.access_token}
+        if self.app_secret:
+            params["appsecret_proof"] = self._compute_proof()
+        return params
+
     def update_token(self, token: str):
         self.access_token = token
 
@@ -48,7 +65,7 @@ class MetaAdsService:
                 "objective": "OUTCOME_SALES",
                 "status": "PAUSED",
                 "special_ad_categories": [],
-                "access_token": self.access_token,
+                **self._auth_params(),
             }
 
             response = httpx.post(
@@ -70,7 +87,7 @@ class MetaAdsService:
                 "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
                 "targeting": self._build_targeting_spec(targeting),
                 "status": "PAUSED",
-                "access_token": self.access_token,
+                **self._auth_params(),
             }
 
             if self.pixel_id:
@@ -143,7 +160,7 @@ class MetaAdsService:
                 self._api_url(adset_id),
                 data={
                     "daily_budget": int(new_budget * 100),
-                    "access_token": self.access_token,
+                    **self._auth_params(),
                 },
             )
             response.raise_for_status()
@@ -162,7 +179,7 @@ class MetaAdsService:
                 self._api_url(campaign_id),
                 data={
                     "status": "PAUSED",
-                    "access_token": self.access_token,
+                    **self._auth_params(),
                 },
             )
             response.raise_for_status()
@@ -181,7 +198,7 @@ class MetaAdsService:
                 self._api_url(campaign_id),
                 data={
                     "status": "ACTIVE",
-                    "access_token": self.access_token,
+                    **self._auth_params(),
                 },
             )
             response.raise_for_status()
@@ -205,7 +222,7 @@ class MetaAdsService:
                 "fields": "campaign_id,campaign_name,impressions,clicks,spend,actions,action_values",
                 "time_range": f'{{"since":"{start_date}","until":"{end_date}"}}',
                 "level": "campaign",
-                "access_token": self.access_token,
+                **self._auth_params(),
             }
 
             response = httpx.get(self._api_url(endpoint), params=params)
@@ -250,7 +267,7 @@ class MetaAdsService:
                 self._api_url(f"act_{self.ad_account_id}"),
                 params={
                     "fields": "name,account_status,currency,timezone_name,balance",
-                    "access_token": self.access_token,
+                    **self._auth_params(),
                 },
             )
             response.raise_for_status()
