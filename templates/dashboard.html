@@ -48,6 +48,8 @@
         .tiktok-badge { background: #e0f7f5; color: #00897b; }
         .google-header { border-bottom: 3px solid #4285f4; }
         .google-badge { background: #e8f0fe; color: #1a73e8; }
+        .shopify-header { border-bottom: 3px solid #96bf48; }
+        .shopify-badge { background: #eef7e0; color: #5a8a00; }
         .channel-body { padding: 20px 22px; }
         .channel-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; margin-bottom: 18px; }
         .ch-metric { background: #f9fafb; border-radius: 8px; padding: 14px; text-align: center; }
@@ -146,6 +148,17 @@
             </div>
         </div>
 
+        <!-- Shopify Products Section -->
+        <div class="channel-section">
+            <div class="channel-header shopify-header">
+                <h2>&#128722; Shopify Products <span class="badge shopify-badge" id="shopify-status-badge">Loading...</span></h2>
+                <button class="refresh-btn" onclick="loadShopifyProducts()">Refresh</button>
+            </div>
+            <div class="channel-body" id="shopify-body">
+                <div class="loading-msg"><div class="spinner"></div> Loading Shopify data...</div>
+            </div>
+        </div>
+
         <div class="activity-section">
             <h2>Recent Activity</h2>
             <div id="activity-log">
@@ -153,7 +166,7 @@
             </div>
         </div>
 
-        <div class="footer">AutoSEM v1.2.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads &mdash; Auto-refreshes every 60s</div>
+        <div class="footer">AutoSEM v1.3.0 &mdash; Court Sportswear &mdash; Meta + TikTok + Google Ads + Shopify &mdash; Auto-refreshes every 60s</div>
     </div>
 
     <script>
@@ -379,6 +392,55 @@
             }
         }
 
+        // ── Shopify Products Section ──
+        async function loadShopifyProducts() {
+            const body = document.getElementById('shopify-body');
+            const badge = document.getElementById('shopify-status-badge');
+            try {
+                const statusRes = await fetch(`${API}/shopify/status`);
+                const status = await statusRes.json();
+                if (status.connected) {
+                    badge.textContent = 'Connected';
+                    badge.className = 'badge shopify-badge';
+
+                    const prodRes = await fetch(`${API}/shopify/products?limit=50`);
+                    const prodData = await prodRes.json();
+                    const products = prodData.products || [];
+                    const active = products.filter(p => p.status === 'active');
+
+                    let html = `<div class="channel-metrics">
+                        <div class="ch-metric"><div class="val">${products.length}</div><div class="lbl">Total Products</div></div>
+                        <div class="ch-metric"><div class="val positive">${active.length}</div><div class="lbl">Active</div></div>
+                        <div class="ch-metric"><div class="val">${products.length - active.length}</div><div class="lbl">Draft/Archived</div></div>
+                        <div class="ch-metric"><div class="val">${products.filter(p => p.tags && p.tags.length > 0).length}</div><div class="lbl">Tagged</div></div>
+                    </div>`;
+
+                    if (products.length > 0) {
+                        html += `<table class="campaign-table"><thead><tr><th>Product</th><th>Handle</th><th>Status</th><th>Tags</th><th>Description</th></tr></thead><tbody>`;
+                        products.forEach(p => {
+                            const tags = p.tags || '';
+                            const truncTags = tags.length > 40 ? tags.substring(0, 40) + '...' : tags;
+                            html += `<tr><td>${p.title || '--'}</td><td style="font-size:0.85em;color:#6b7280">${p.handle || '--'}</td><td><span class="status status-${p.status}">${p.status}</span></td><td style="font-size:0.85em">${truncTags || '<em style="color:#9ca3af">none</em>'}</td><td style="color:#6b7280;font-size:0.85em">${p.body_html_length || 0} chars</td></tr>`;
+                        });
+                        html += `</tbody></table>`;
+                    } else {
+                        html += `<div class="no-data">No products found. Use Sync to import from Shopify.</div>`;
+                    }
+                    body.innerHTML = html;
+                } else {
+                    badge.textContent = 'Disconnected';
+                    badge.style.background = '#fee2e2';
+                    badge.style.color = '#991b1b';
+                    body.innerHTML = `<div class="no-data">Shopify not connected. Set SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET in environment.</div>`;
+                }
+            } catch(e) {
+                body.innerHTML = `<div class="no-data">Failed to load Shopify data: ${e.message}</div>`;
+                badge.textContent = 'Error';
+                badge.style.background = '#fee2e2';
+                badge.style.color = '#991b1b';
+            }
+        }
+
         // ── Activity Log ──
         async function loadActivity() {
             const container = document.getElementById('activity-log');
@@ -411,7 +473,7 @@
         function viewReports() { window.open('/docs', '_blank'); }
         async function syncProducts() {
             try {
-                const res = await fetch(`${API}/products/sync-shopify`, { method: 'POST' });
+                const res = await fetch(`${API}/shopify/sync`, { method: 'POST' });
                 const d = await res.json();
                 alert(`Synced ${d.synced || d.products_synced || 0} products`);
             } catch(e) { alert('Sync failed: ' + e.message); }
@@ -424,6 +486,7 @@
             loadMetaPerformance();
             loadTikTokPerformance();
             loadGooglePerformance();
+            loadShopifyProducts();
             loadActivity();
         }
 
