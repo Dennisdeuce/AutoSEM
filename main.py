@@ -63,7 +63,7 @@ def create_app():
     def root():
         return {
             "name": "AutoSEM",
-            "version": "1.2.0",
+            "version": "1.3.0",
             "status": "running",
             "routers": routers_loaded,
             "timestamp": datetime.utcnow().isoformat(),
@@ -73,14 +73,14 @@ def create_app():
     def health():
         return {
             "status": "healthy",
-            "version": "1.2.0",
+            "version": "1.3.0",
             "routers_loaded": routers_loaded,
             "router_count": len(routers_loaded),
         }
 
     @app.get("/version")
     def version():
-        return {"version": "1.2.0"}
+        return {"version": "1.3.0"}
 
     @app.get("/dashboard")
     def dashboard():
@@ -90,7 +90,7 @@ def create_app():
                 from starlette.datastructures import URL
                 scope = {"type": "http", "method": "GET", "path": "/dashboard", "query_string": b"", "headers": []}
                 request = Request(scope)
-                return templates.TemplateResponse("dashboard.html", {"request": request, "version": "1.2.0"})
+                return templates.TemplateResponse("dashboard.html", {"request": request, "version": "1.3.0"})
             except Exception as e:
                 logger.error(f"Template error: {e}")
                 from fastapi.responses import HTMLResponse
