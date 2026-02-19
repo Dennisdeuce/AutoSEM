@@ -6,6 +6,7 @@ by initializing one on first deploy.
 
 import os
 import sys
+import signal
 import hmac
 import hashlib
 import subprocess
@@ -88,14 +89,25 @@ def _verify_github_signature(payload_body: bytes, signature_header: str) -> bool
 
 
 def _schedule_restart(delay: float = 2.0):
-    """Restart the Python process after a short delay so the HTTP response can be sent."""
+    """Restart by exiting — Replit's always-on supervisor restarts the process.
 
-    def _restart():
-        logger.info("Restarting process with os.execv ...")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+    os.execv does NOT work in Replit's managed runtime. Instead we do a hard
+    exit after a short delay (so the HTTP response can be sent first).
+    The process supervisor (systemd / always-on) will relaunch us automatically
+    with the freshly-pulled code.
+    """
 
-    threading.Timer(delay, _restart).start()
-    logger.info(f"Process restart scheduled in {delay}s")
+    def _do_exit():
+        logger.info("Exiting process for restart (supervisor will relaunch) ...")
+        try:
+            # Try SIGTERM first — gives uvicorn a chance to shut down gracefully
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            # Fallback: hard exit that bypasses cleanup
+            os._exit(0)
+
+    threading.Timer(delay, _do_exit).start()
+    logger.info(f"Process exit scheduled in {delay}s — supervisor will restart")
 
 
 @router.post("/pull", summary="Pull latest code from GitHub")

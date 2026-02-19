@@ -2,8 +2,10 @@
 Runs periodic optimization cycles and performance syncs.
 Writes heartbeat timestamps to SettingsModel after each job.
 Logs start/end of each job to ActivityLogModel.
+
+Phase 8: Jobs use SessionLocal() directly instead of HTTP self-calls.
 """
-import os
+import json
 import logging
 from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -55,23 +57,50 @@ def _log_job_activity(action: str, details: str):
 
 
 def run_optimization_cycle():
-    """Execute a full optimization cycle."""
+    """Execute a full optimization cycle with a proper DB session."""
     ts = datetime.now(timezone.utc).isoformat()
     logger.info(f"[{ts}] Starting scheduled optimization cycle")
     _log_job_activity("SCHEDULER_JOB_START", "optimization_cycle started")
 
     status = "ok"
     error_msg = ""
+    results = None
+
+    from app.database import SessionLocal, ActivityLogModel
+    db = SessionLocal()
     try:
-        import httpx
-        base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
-        response = httpx.post(f"{base_url}/api/v1/automation/run-cycle", timeout=120)
-        logger.info(f"Optimization cycle result: {response.status_code}")
+        from app.services.optimizer import CampaignOptimizer
+        optimizer = CampaignOptimizer(db)
+        results = optimizer.optimize_all()
+        logger.info(f"Optimization cycle completed: {len(results) if results else 0} actions")
+
+        # Log result to activity log
+        activity = ActivityLogModel(
+            action="SCHEDULER_OPTIMIZE",
+            entity_type="scheduler",
+            entity_id="",
+            details=json.dumps(results, default=str) if results else "No actions taken",
+        )
+        db.add(activity)
+        db.commit()
     except Exception as e:
         status = "error"
         error_msg = str(e)
         logger.error(f"Scheduled optimization failed: {e}")
+        db.rollback()
+        try:
+            activity = ActivityLogModel(
+                action="SCHEDULER_ERROR",
+                entity_type="scheduler",
+                entity_id="",
+                details=f"Optimization failed: {error_msg}",
+            )
+            db.add(activity)
+            db.commit()
+        except Exception:
+            pass
     finally:
+        db.close()
         _write_heartbeat("last_optimization")
         end_ts = datetime.now(timezone.utc).isoformat()
         _log_job_activity("SCHEDULER_JOB_END", f"optimization_cycle finished ({status}){': ' + error_msg if error_msg else ''}")
@@ -79,23 +108,48 @@ def run_optimization_cycle():
 
 
 def sync_performance():
-    """Sync performance data from ad platforms."""
+    """Sync performance data from ad platforms with a proper DB session."""
     ts = datetime.now(timezone.utc).isoformat()
     logger.info(f"[{ts}] Starting scheduled performance sync")
     _log_job_activity("SCHEDULER_JOB_START", "sync_performance started")
 
     status = "ok"
     error_msg = ""
+
+    from app.database import SessionLocal, ActivityLogModel
+    db = SessionLocal()
     try:
-        import httpx
-        base_url = os.getenv("AUTOSEM_BASE_URL", "http://localhost:8000")
-        response = httpx.post(f"{base_url}/api/v1/automation/sync-performance", timeout=60)
-        logger.info(f"Performance sync result: {response.status_code}")
+        from app.services.performance_sync import PerformanceSyncService
+        sync_service = PerformanceSyncService(db)
+        result = sync_service.sync_all()
+        logger.info(f"Performance sync completed: {result}")
+
+        activity = ActivityLogModel(
+            action="SCHEDULER_SYNC",
+            entity_type="scheduler",
+            entity_id="",
+            details=json.dumps(result, default=str) if result else "Sync completed",
+        )
+        db.add(activity)
+        db.commit()
     except Exception as e:
         status = "error"
         error_msg = str(e)
         logger.error(f"Scheduled performance sync failed: {e}")
+        db.rollback()
+        try:
+            activity = ActivityLogModel(
+                action="SCHEDULER_ERROR",
+                entity_type="scheduler",
+                entity_id="",
+                details=f"Performance sync failed: {error_msg}",
+            )
+            db.add(activity)
+            db.commit()
+        except Exception:
+            pass
     finally:
+        db.close()
         _write_heartbeat("last_sync_performance")
         end_ts = datetime.now(timezone.utc).isoformat()
         _log_job_activity("SCHEDULER_JOB_END", f"sync_performance finished ({status}){': ' + error_msg if error_msg else ''}")

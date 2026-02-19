@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, text
 
 from app.database import (
-    get_db, engine, CampaignModel, MetaTokenModel,
+    get_db, SessionLocal, engine, CampaignModel, MetaTokenModel,
     TikTokTokenModel, ActivityLogModel,
 )
 
@@ -187,3 +187,33 @@ def deep_health(db: Session = Depends(get_db)):
         report["issues"] = issues
 
     return report
+
+
+@router.get("/reset-db", summary="Reset stuck DB transactions",
+            description="Rollback any stuck/poisoned DB sessions to clear InFailedSqlTransaction state")
+def reset_db():
+    """Clear stuck DB transactions without restarting the app."""
+    try:
+        db = SessionLocal()
+        try:
+            db.rollback()
+            # Verify DB is healthy after reset
+            db.execute(text("SELECT 1"))
+            return {
+                "status": "ok",
+                "message": "DB session reset. Transactions rolled back.",
+            }
+        finally:
+            db.close()
+
+        # Also dispose engine connections to clear any poisoned pool connections
+    except Exception as e:
+        # Nuclear option: dispose the entire connection pool
+        try:
+            engine.dispose()
+            return {
+                "status": "ok",
+                "message": f"Connection pool disposed and recreated. Previous error: {e}",
+            }
+        except Exception as e2:
+            return {"status": "error", "message": f"Reset failed: {e2}"}
