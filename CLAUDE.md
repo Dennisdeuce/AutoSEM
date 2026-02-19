@@ -9,9 +9,9 @@ AutoSEM is an autonomous advertising platform built with FastAPI. It manages mul
 **Store:** https://court-sportswear.com
 **Repo:** https://github.com/Dennisdeuce/AutoSEM (branch: main)
 
-## Current Version: 1.6.0
+## Current Version: 1.7.0
 
-12 routers, 70+ endpoints, optimization engine operational, 2 active Meta campaigns syncing real performance data.
+13 routers, 75+ endpoints. Optimization engine operational with auto-actions. 2 active Meta campaigns syncing real performance data. JSON-LD structured data and XML sitemap generation. Klaviyo with DB key fallback.
 
 ## Commands
 
@@ -22,12 +22,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 # Deploy (from any machine with API access)
 curl -X POST https://auto-sem.replit.app/api/v1/deploy/pull \
   -H "X-Deploy-Key: autosem-deploy-2026"
-# App auto-restarts after pulling. No manual Republish needed.
-
-# GitHub webhook auto-deploy (configure in repo Settings > Webhooks)
-# URL: https://auto-sem.replit.app/api/v1/deploy/github-webhook
-# Content-Type: application/json
-# Set GITHUB_WEBHOOK_SECRET env var for signature verification
+# ⚠️ Code pulls successfully but auto-restart via os.execv DOES NOT WORK in Replit.
+# After pulling, a manual restart is still required (see Deploy Flow below).
 
 # Swagger docs
 https://auto-sem.replit.app/docs
@@ -37,7 +33,7 @@ No test framework configured. Use Swagger UI or curl for testing.
 
 ## Architecture
 
-**FastAPI** app (`main.py`) with 12 routers under `/api/v1/`:
+**FastAPI** app (`main.py`) with 13 routers under `/api/v1/`:
 
 | Router | Prefix | Purpose |
 |--------|--------|---------|
@@ -47,11 +43,12 @@ No test framework configured. Use Swagger UI or curl for testing.
 | `campaigns` | `/campaigns` | CRUD for campaign records, /active endpoint |
 | `products` | `/products` | Shopify product sync and management |
 | `settings` | `/settings` | Spend limits, ROAS thresholds, emergency pause config |
-| `deploy` | `/deploy` | GitHub webhook + deploy/pull with auto-restart |
+| `deploy` | `/deploy` | GitHub webhook + deploy/pull (code pull works, restart needs fix) |
 | `shopify` | `/shopify` | Shopify Admin API, webhook registration, token refresh |
 | `google_ads` | `/google` | Google Ads campaigns (returns not_configured when no credentials) |
-| `klaviyo` | `/klaviyo` | Klaviyo flows, abandoned cart, email marketing |
+| `klaviyo` | `/klaviyo` | Klaviyo flows, abandoned cart, email marketing, POST /set-key |
 | `health` | `/health` | Deep health check — DB, tokens, scheduler, financials |
+| `seo` | `/seo` | JSON-LD structured data, XML sitemap generation |
 | `automation` | - | Activity log endpoint (merged into dashboard router) |
 
 **Database:** PostgreSQL on Neon (`ep-delicate-queen-ah2ayed9.c-3.us-east-1.aws.neon.tech/neondb`)
@@ -66,17 +63,21 @@ Tables: products, campaigns, meta_tokens, tiktok_tokens, activity_logs, settings
 
 - `main.py` — FastAPI app factory, router registration, version
 - `app/version.py` — Single source of truth for VERSION
-- `app/routers/` — All 12 API router modules
+- `app/routers/` — All 13 API router modules
+- `app/routers/seo.py` — JSON-LD and sitemap endpoints (Phase 7)
 - `app/services/meta_ads.py` — Meta API with appsecret_proof, adset discovery
 - `app/services/optimizer.py` — Auto-actions: budget scaling, pausing, CPC rules
-- `app/services/klaviyo_service.py` — Abandoned cart flow, Shopify discount codes
+- `app/services/klaviyo_service.py` — Abandoned cart flow, DB key fallback (Phase 7)
 - `app/services/shopify_token.py` — Centralized token manager with DB persistence
 - `app/services/shopify_webhook_register.py` — Webhook registration with logging
 - `app/services/attribution.py` — UTM-based revenue attribution from Shopify webhooks
+- `app/services/jsonld_generator.py` — Product schema.org JSON-LD generator (Phase 7)
+- `app/services/sitemap.py` — XML sitemap generator (Phase 7)
 - `app/database.py` — SQLAlchemy models and session management
 - `app/schemas.py` — Pydantic request/response models
 - `scheduler.py` — Background task scheduling
 - `templates/dashboard.html` — Dashboard UI with 7 tabs
+- `shopify.app.toml` — Shopify app config with required scopes (Phase 7)
 
 ## Active Meta Campaigns
 
@@ -101,8 +102,8 @@ The optimizer runs every 6h and executes real Meta API actions:
 ### Shopify (Court Sportswear: `4448da-3.myshopify.com`)
 - Token: Auto-refreshed via client_credentials every 20h, persisted in SettingsModel
 - **MISSING SCOPES:** Current token lacks `read_orders, write_orders, read_webhooks, write_webhooks`
-- This blocks: webhook registration (orders/create), revenue attribution from real orders
-- Fix: Update app scopes in Shopify dev dashboard, then reinstall
+- `shopify.app.toml` (Phase 7) defines correct scopes — needs `npx shopify app deploy` to push
+- Fix: Update app scopes in Shopify admin → Custom Apps → AutoSEM → Configuration
 - Env vars: `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_STORE`
 
 ### Meta Ads (ad account: `act_1358540228396119`, app: `909757658089305`)
@@ -119,23 +120,35 @@ The optimizer runs every 6h and executes real Meta API actions:
 ### Klaviyo
 - API key: `pk_8331b081008957a6922794034954df1d69`
 - Stored in Replit Secrets as `KLAVIYO_API_KEY` but env var not loading
-- **NEEDS FIX:** Add DB fallback in KlaviyoService or debug Replit Secrets loading
+- Phase 7 added DB fallback: KlaviyoService checks SettingsModel if env var empty
+- Phase 7 added POST /klaviyo/set-key to store key in DB
+- Once v1.7.0 is running, set key via: `POST /api/v1/klaviyo/set-key {"api_key": "pk_8331b..."}`
 - 3-email abandoned cart flow ready to deploy once key loads
 
 ### Google Ads
 - Router exists but returns `not_configured` (no credentials set)
-- Phase 2+ integration planned
+- Future integration planned
 
 ## Deploy Flow
 
+### ⚠️ CRITICAL: os.execv does NOT work in Replit
+
+The current deploy/pull endpoint pulls code from GitHub successfully but the auto-restart mechanism (os.execv) fails silently in Replit's managed environment. The code is updated on disk but the running process still serves the old version.
+
+**Current working deploy flow:**
 ```
 1. Claude Code pushes to GitHub
-2. Chat Claude calls POST /api/v1/deploy/pull with X-Deploy-Key header
-3. App auto-pulls from GitHub and restarts (os.execv)
-4. No manual Republish needed
+2. Chat Claude calls POST /api/v1/deploy/pull (pulls code to disk)
+3. ❌ Auto-restart fails — process still runs old version
+4. Manual: User clicks Republish in Replit UI OR Claude Code restarts via Replit Shell
 ```
 
-If auto-restart fails, manual deploy:
+**Phase 8 MUST fix this** by replacing os.execv with a Replit-compatible restart:
+- Option A: `sys.exit(0)` — Replit's always-on may auto-restart the process
+- Option B: subprocess to kill own PID, relying on Replit's process supervisor
+- Option C: Write a `.restart-trigger` file that Replit watches
+
+**Fallback manual deploy:**
 ```bash
 # In Replit shell:
 git fetch github main && git reset --hard github/main
@@ -144,18 +157,22 @@ git fetch github main && git reset --hard github/main
 
 ## Known Bugs
 
-### BUG-1: Scheduler optimizer missing DB session
+### BUG-1: Scheduler optimizer missing DB session (CRITICAL)
 The scheduler's automation cycle fails with: `CampaignOptimizer.__init__() missing 1 required positional argument: 'db'`
 The optimizer works when called via API but the scheduler doesn't pass the DB session.
-**Fix needed in:** `scheduler.py` — create a DB session and pass to CampaignOptimizer
+**Fix needed in:** `scheduler.py` — create a DB session using SessionLocal() and pass to CampaignOptimizer
 
-### BUG-2: Klaviyo env var not loading
+### BUG-2: Klaviyo env var not loading (WORKAROUND IN v1.7.0)
 `KLAVIYO_API_KEY` is in Replit Secrets but `os.environ.get("KLAVIYO_API_KEY")` returns empty.
-**Fix needed:** Add DB fallback — check SettingsModel if env var is empty. Add POST /klaviyo/set-key endpoint.
+Phase 7 added DB fallback — once v1.7.0 is running, set key via POST /klaviyo/set-key endpoint.
 
 ### BUG-3: Shopify scopes insufficient
 Current scopes lack orders and webhooks. The `orders/create` webhook topic is rejected.
-**Fix needed:** Update app scopes in Shopify dev dashboard to include read_orders, write_orders, read_webhooks, write_webhooks.
+**Fix needed:** Update app scopes in Shopify admin, then reinstall. `shopify.app.toml` already has correct scopes.
+
+### BUG-4: Deploy auto-restart broken in Replit
+os.execv does not work in Replit's managed runtime. Code pulls to disk but process doesn't restart.
+**Fix needed in:** `app/routers/deploy.py` — replace os.execv with Replit-compatible restart mechanism.
 
 ## Dashboard Tabs
 
@@ -183,4 +200,15 @@ See Replit Secrets. Key vars:
 - Graceful error handling — endpoints return `{"success": false, "error": "..."}` on failure
 - Activity logging via ActivityLogModel for all automated actions
 - Meta budget parameters are in **cents** (e.g., 1500 = $15/day)
-- Deploy via API — never require manual Republish
+- Deploy via API — code pulls work, restart still needs fix (BUG-4)
+
+## Phase History
+
+- **Phase 1:** Bug fixes, campaign activation, phantom cleanup
+- **Phase 2:** Klaviyo service, attribution, health endpoint, dashboard upgrades
+- **Phase 3:** Shopify webhooks, schema fixes, Google Ads hardening, scheduler heartbeat (v1.4.0)
+- **Phase 4:** Webhook fix, token refresh, optimizer auto-actions, adset discovery (v1.5.0)
+- **Phase 5:** Deploy webhook, campaign schema fix, dashboard polish, activity log (v1.6.0)
+- **Phase 6:** Auto-restart attempt (os.execv — doesn't work in Replit)
+- **Phase 7:** Shopify TOML, Klaviyo DB fallback, JSON-LD, sitemap (v1.7.0)
+- **Phase 8:** (NEXT) Fix deploy restart, scheduler DB session, dashboard improvements
