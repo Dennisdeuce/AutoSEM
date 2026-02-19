@@ -1,280 +1,378 @@
-"""Shopify Admin API router with auto-refreshing client_credentials tokens.
+"""
+Shopify Integration Router - Token Management & Product Operations
+v1.0.0 - Auto-refresh client_credentials tokens, product CRUD
 
-Tokens expire every 24h. This module generates a fresh token before each
-API call using the client_credentials OAuth flow, so no manual rotation needed.
-
-Required Replit Secrets:
-  SHOPIFY_CLIENT_ID      - Custom app client ID
-  SHOPIFY_CLIENT_SECRET  - Custom app client secret (shpss_...)
-  SHOPIFY_STORE          - myshopify domain (e.g. 4448da-3.myshopify.com)
+Shopify tokens expire every 24 hours. This router handles:
+- Automatic token refresh via client_credentials grant
+- Product listing and updates
+- Collection management
+- Store health checks
 """
 
 import os
 import time
 import logging
-from typing import Optional
+import hashlib
+import hmac
+from datetime import datetime, timezone
 
 import requests
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from typing import Optional
+
+from app.database import get_db, ActivityLogModel
 
 logger = logging.getLogger("AutoSEM.Shopify")
 router = APIRouter()
 
-# ---------------------------------------------------------------------------
-# Token cache — reuse until 1h before expiry
-# ---------------------------------------------------------------------------
-
-_token_cache: dict = {"token": None, "expires_at": 0}
-
+# ─── Configuration ────────────────────────────────────────────────
+SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "4448da-3.myshopify.com")
 SHOPIFY_CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID", "")
 SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
-SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "4448da-3.myshopify.com")
-API_VERSION = "2025-01"
+SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2024-10")
+
+# In-memory token cache (refreshed automatically)
+_token_cache = {
+    "access_token": os.environ.get("SHOPIFY_ACCESS_TOKEN", ""),
+    "expires_at": 0,  # Unix timestamp
+    "scopes": "",
+}
+
+
+# ─── Token Management ────────────────────────────────────────────
+
+def _refresh_token() -> str:
+    """Generate a fresh Shopify token via client_credentials grant.
+    
+    Tokens expire every ~24 hours (86,399 seconds).
+    CRITICAL: Content-Type must be x-www-form-urlencoded, NOT JSON.
+    """
+    if not SHOPIFY_CLIENT_ID or not SHOPIFY_CLIENT_SECRET:
+        logger.warning("Shopify client credentials not configured")
+        return _token_cache.get("access_token", "")
+
+    try:
+        resp = requests.post(
+            f"https://{SHOPIFY_STORE}/admin/oauth/access_token",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "client_credentials",
+                "client_id": SHOPIFY_CLIENT_ID,
+                "client_secret": SHOPIFY_CLIENT_SECRET,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        token = data.get("access_token", "")
+        expires_in = data.get("expires_in", 86399)
+        scopes = data.get("scope", "")
+
+        _token_cache["access_token"] = token
+        _token_cache["expires_at"] = time.time() + expires_in - 300  # 5 min buffer
+        _token_cache["scopes"] = scopes
+
+        logger.info(f"Shopify token refreshed, expires in {expires_in}s, scopes: {scopes[:80]}")
+        return token
+
+    except Exception as e:
+        logger.error(f"Shopify token refresh failed: {e}")
+        return _token_cache.get("access_token", "")
 
 
 def _get_token() -> str:
-    """Get a valid Shopify Admin API token, refreshing if needed."""
-    now = time.time()
-    if _token_cache["token"] and _token_cache["expires_at"] > now + 3600:
-        return _token_cache["token"]
-
-    if not SHOPIFY_CLIENT_ID or not SHOPIFY_CLIENT_SECRET:
-        raise HTTPException(
-            status_code=500,
-            detail="SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET must be set",
-        )
-
-    resp = requests.post(
-        f"https://{SHOPIFY_STORE}/admin/oauth/access_token",
-        data={
-            "client_id": SHOPIFY_CLIENT_ID,
-            "client_secret": SHOPIFY_CLIENT_SECRET,
-            "grant_type": "client_credentials",
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=15,
-    )
-
-    if resp.status_code != 200:
-        logger.error(f"Token exchange failed ({resp.status_code}): {resp.text}")
-        raise HTTPException(status_code=502, detail="Shopify token exchange failed")
-
-    data = resp.json()
-    token = data["access_token"]
-    expires_in = data.get("expires_in", 86400)
-
-    _token_cache["token"] = token
-    _token_cache["expires_at"] = now + expires_in
-    logger.info(f"Shopify token refreshed, expires in {expires_in}s, scopes: {data.get('scope', 'n/a')}")
-    return token
+    """Get a valid Shopify access token, refreshing if expired."""
+    if time.time() >= _token_cache.get("expires_at", 0):
+        return _refresh_token()
+    return _token_cache.get("access_token", "")
 
 
-def _api(method: str, path: str, json_body: dict = None) -> dict:
-    """Make an authenticated Shopify Admin API call."""
+def _api(method: str, endpoint: str, **kwargs) -> dict:
+    """Make an authenticated Shopify Admin API request."""
     token = _get_token()
-    url = f"https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/{path}"
-    resp = requests.request(
-        method, url,
-        headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
-        json=json_body,
-        timeout=30,
-    )
+    if not token:
+        raise HTTPException(status_code=503, detail="No Shopify token available")
+
+    url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VERSION}/{endpoint}"
+    headers = {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+    }
+
+    resp = requests.request(method, url, headers=headers, timeout=20, **kwargs)
+
     if resp.status_code == 401:
-        # Token may have been revoked — force refresh and retry once
-        _token_cache["token"] = None
+        # Token expired mid-request, force refresh and retry once
+        logger.warning("Shopify 401 — forcing token refresh")
+        _token_cache["expires_at"] = 0
         token = _get_token()
-        resp = requests.request(
-            method, url,
-            headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
-            json=json_body,
-            timeout=30,
-        )
-    resp.raise_for_status()
+        headers["X-Shopify-Access-Token"] = token
+        resp = requests.request(method, url, headers=headers, timeout=20, **kwargs)
+
     return resp.json()
 
 
-# ---------------------------------------------------------------------------
-# Request/Response models
-# ---------------------------------------------------------------------------
+def _log_activity(db: Session, action: str, entity_id: str = "", details: str = ""):
+    """Log activity to the database."""
+    try:
+        log = ActivityLogModel(
+            action=action,
+            entity_type="shopify",
+            entity_id=entity_id,
+            details=details,
+        )
+        db.add(log)
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to log activity: {e}")
 
-class TagsUpdate(BaseModel):
+
+# ─── Request Models ───────────────────────────────────────────────
+
+class UpdateProductRequest(BaseModel):
     product_id: int
-    tags: str  # comma-separated tag string
-
-
-class DescriptionUpdate(BaseModel):
-    product_id: int
-    body_html: str
-
-
-class ProductUpdate(BaseModel):
-    product_id: int
-    tags: Optional[str] = None
-    body_html: Optional[str] = None
     title: Optional[str] = None
+    body_html: Optional[str] = None
+    tags: Optional[str] = None
+    status: Optional[str] = None  # "active" or "draft"
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
+class UpdateProductMetafieldRequest(BaseModel):
+    product_id: int
+    namespace: str = "global"
+    key: str
+    value: str
+    type: str = "single_line_text_field"
+
+
+# ─── Endpoints ────────────────────────────────────────────────────
 
 @router.get("/status", summary="Shopify connection status")
 def shopify_status():
-    """Check Shopify connection and token validity."""
+    """Check Shopify token health and store connectivity."""
+    token = _get_token()
+    if not token:
+        return {
+            "connected": False,
+            "message": "No Shopify credentials configured",
+            "store": SHOPIFY_STORE,
+        }
+
     try:
-        token = _get_token()
+        data = _api("GET", "shop.json")
+        shop = data.get("shop", {})
         return {
             "connected": True,
             "store": SHOPIFY_STORE,
-            "api_version": API_VERSION,
-            "token_prefix": token[:12] + "...",
-            "expires_at": _token_cache["expires_at"],
+            "shop_name": shop.get("name", ""),
+            "domain": shop.get("domain", ""),
+            "plan": shop.get("plan_display_name", ""),
+            "token_expires_in": max(0, int(_token_cache["expires_at"] - time.time())),
+            "scopes": _token_cache.get("scopes", ""),
         }
     except Exception as e:
-        return {"connected": False, "error": str(e)}
+        return {
+            "connected": False,
+            "message": str(e),
+            "store": SHOPIFY_STORE,
+        }
 
 
-@router.get("/products", summary="List all Shopify products")
-def list_products(limit: int = 50):
-    """Fetch products directly from Shopify Admin API."""
-    data = _api("GET", f"products.json?limit={limit}&fields=id,title,tags,status,handle,body_html")
+@router.post("/refresh-token", summary="Force token refresh")
+def force_refresh_token():
+    """Force-refresh the Shopify access token."""
+    _token_cache["expires_at"] = 0
+    token = _get_token()
+    if token:
+        return {
+            "status": "refreshed",
+            "token_prefix": token[:12] + "...",
+            "expires_in": int(_token_cache["expires_at"] - time.time()),
+            "scopes": _token_cache.get("scopes", ""),
+        }
+    return {"status": "error", "message": "Failed to refresh token"}
+
+
+@router.get("/products", summary="List all products")
+def list_products(limit: int = 50, status: str = "active"):
+    """Get all products with key fields."""
+    data = _api("GET", f"products.json?limit={limit}&status={status}&fields=id,title,handle,status,tags,variants,body_html")
     products = data.get("products", [])
+
+    result = []
+    for p in products:
+        variants = p.get("variants", [])
+        result.append({
+            "id": p["id"],
+            "title": p["title"],
+            "handle": p["handle"],
+            "status": p.get("status", ""),
+            "tags": p.get("tags", ""),
+            "price": variants[0].get("price", "") if variants else "",
+            "has_description": len(p.get("body_html", "") or "") > 100,
+            "description_length": len(p.get("body_html", "") or ""),
+        })
+
     return {
-        "count": len(products),
-        "products": [
-            {
-                "id": p["id"],
-                "title": p["title"],
-                "handle": p.get("handle"),
-                "tags": p.get("tags", ""),
-                "status": p.get("status"),
-                "body_html_length": len(p.get("body_html") or ""),
-            }
-            for p in products
-        ],
+        "status": "ok",
+        "count": len(result),
+        "products": result,
     }
 
 
-@router.get("/products/{product_id}", summary="Get a single product")
+@router.get("/products/{product_id}", summary="Get single product")
 def get_product(product_id: int):
-    """Fetch a single product with full details."""
+    """Get full product details."""
     data = _api("GET", f"products/{product_id}.json")
-    return data.get("product", {})
+    product = data.get("product")
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return {"status": "ok", "product": product}
 
 
-@router.put("/products/{product_id}/tags", summary="Update product tags")
-def update_tags(product_id: int, body: TagsUpdate):
-    """Update tags on a product."""
-    data = _api("PUT", f"products/{product_id}.json", {
-        "product": {"id": product_id, "tags": body.tags}
-    })
-    p = data.get("product", {})
-    return {"success": True, "id": p.get("id"), "tags": p.get("tags")}
+@router.put("/products/{product_id}", summary="Update a product")
+def update_product(product_id: int, req: UpdateProductRequest, db: Session = Depends(get_db)):
+    """Update product fields (title, description, tags, status)."""
+    update = {}
+    if req.title is not None:
+        update["title"] = req.title
+    if req.body_html is not None:
+        update["body_html"] = req.body_html
+    if req.tags is not None:
+        update["tags"] = req.tags
+    if req.status is not None:
+        update["status"] = req.status
 
+    if not update:
+        return {"status": "error", "message": "No fields to update"}
 
-@router.put("/products/{product_id}/description", summary="Update product description")
-def update_description(product_id: int, body: DescriptionUpdate):
-    """Update body_html on a product."""
-    data = _api("PUT", f"products/{product_id}.json", {
-        "product": {"id": product_id, "body_html": body.body_html}
-    })
-    p = data.get("product", {})
-    return {
-        "success": True,
-        "id": p.get("id"),
-        "title": p.get("title"),
-        "body_html_length": len(p.get("body_html") or ""),
-    }
+    data = _api("PUT", f"products/{product_id}.json", json={"product": {"id": product_id, **update}})
+    product = data.get("product")
 
+    if product:
+        fields_updated = list(update.keys())
+        _log_activity(db, "SHOPIFY_PRODUCT_UPDATED", str(product_id),
+                      f"Updated {', '.join(fields_updated)} on {product.get('title', '')}")
+        return {
+            "status": "updated",
+            "product_id": product_id,
+            "fields_updated": fields_updated,
+            "title": product.get("title", ""),
+        }
 
-@router.put("/products/{product_id}", summary="Update product (tags, description, title)")
-def update_product(product_id: int, body: ProductUpdate):
-    """Update multiple fields on a product at once."""
-    update = {"id": product_id}
-    if body.tags is not None:
-        update["tags"] = body.tags
-    if body.body_html is not None:
-        update["body_html"] = body.body_html
-    if body.title is not None:
-        update["title"] = body.title
-
-    data = _api("PUT", f"products/{product_id}.json", {"product": update})
-    p = data.get("product", {})
-    return {
-        "success": True,
-        "id": p.get("id"),
-        "title": p.get("title"),
-        "tags": p.get("tags"),
-        "body_html_length": len(p.get("body_html") or ""),
-    }
+    return {"status": "error", "message": "Update failed", "response": data}
 
 
 @router.get("/collections", summary="List all collections")
 def list_collections():
-    """List smart and custom collections."""
-    smart = _api("GET", "smart_collections.json?fields=id,title,rules")
-    custom = _api("GET", "custom_collections.json?fields=id,title")
+    """Get all smart and custom collections."""
+    smart = _api("GET", "smart_collections.json?fields=id,title,handle,rules,published_at")
+    custom = _api("GET", "custom_collections.json?fields=id,title,handle,published_at")
+
+    collections = []
+    for c in smart.get("smart_collections", []):
+        collections.append({
+            "id": c["id"],
+            "title": c["title"],
+            "handle": c.get("handle", ""),
+            "type": "smart",
+            "rules": c.get("rules", []),
+            "published": c.get("published_at") is not None,
+        })
+    for c in custom.get("custom_collections", []):
+        collections.append({
+            "id": c["id"],
+            "title": c["title"],
+            "handle": c.get("handle", ""),
+            "type": "custom",
+            "published": c.get("published_at") is not None,
+        })
+
+    return {"status": "ok", "count": len(collections), "collections": collections}
+
+
+@router.get("/collections/{collection_id}/products", summary="Products in a collection")
+def collection_products(collection_id: int):
+    """Get products belonging to a specific collection."""
+    data = _api("GET", f"collections/{collection_id}/products.json?fields=id,title,handle,status,tags")
+    products = data.get("products", [])
     return {
-        "smart_collections": smart.get("smart_collections", []),
-        "custom_collections": custom.get("custom_collections", []),
+        "status": "ok",
+        "collection_id": collection_id,
+        "count": len(products),
+        "products": products,
     }
 
 
-@router.post("/sync", summary="Sync products to local DB")
-def sync_to_db():
-    """Fetch all products from Shopify and sync to local database."""
-    from sqlalchemy.orm import Session
-    from app.database import get_db, ProductModel
+@router.get("/health-check", summary="Full store health audit")
+def store_health_check():
+    """Run a comprehensive health check on the store."""
+    token = _get_token()
+    if not token:
+        return {"status": "error", "message": "No Shopify token"}
 
-    db: Session = next(get_db())
-    try:
-        data = _api("GET", "products.json?limit=250")
-        products = data.get("products", [])
-        synced = 0
+    # Get products
+    products_data = _api("GET", "products.json?limit=250&status=active&fields=id,title,body_html,tags,variants")
+    products = products_data.get("products", [])
 
-        for p in products:
-            images_str = ",".join([img["src"] for img in p.get("images", [])])
-            variants_str = str(p.get("variants", []))
-            price = float(p["variants"][0]["price"]) if p.get("variants") else None
+    # Get collections
+    smart = _api("GET", "smart_collections.json?fields=id,title,products_count,published_at")
+    custom = _api("GET", "custom_collections.json?fields=id,title,published_at")
 
-            existing = db.query(ProductModel).filter(
-                ProductModel.shopify_id == str(p["id"])
-            ).first()
+    # Analyze products
+    total = len(products)
+    with_description = sum(1 for p in products if len(p.get("body_html", "") or "") > 100)
+    with_tags = sum(1 for p in products if p.get("tags", ""))
+    price_range = []
+    for p in products:
+        for v in p.get("variants", []):
+            try:
+                price_range.append(float(v.get("price", 0)))
+            except (ValueError, TypeError):
+                pass
 
-            if existing:
-                existing.title = p["title"]
-                existing.description = p.get("body_html", "")
-                existing.handle = p.get("handle", "")
-                existing.product_type = p.get("product_type", "")
-                existing.vendor = p.get("vendor", "")
-                existing.price = price
-                existing.images = images_str
-                existing.variants = variants_str
-                existing.tags = p.get("tags", "")
-                existing.is_available = p.get("status") == "active"
-            else:
-                db.add(ProductModel(
-                    shopify_id=str(p["id"]),
-                    title=p["title"],
-                    description=p.get("body_html", ""),
-                    handle=p.get("handle", ""),
-                    product_type=p.get("product_type", ""),
-                    vendor=p.get("vendor", ""),
-                    price=price,
-                    images=images_str,
-                    variants=variants_str,
-                    tags=p.get("tags", ""),
-                    is_available=p.get("status") == "active",
-                ))
-            synced += 1
+    return {
+        "status": "healthy",
+        "store": SHOPIFY_STORE,
+        "token_valid": True,
+        "token_expires_in": max(0, int(_token_cache["expires_at"] - time.time())),
+        "products": {
+            "total": total,
+            "with_description": with_description,
+            "with_tags": with_tags,
+            "cro_coverage": f"{with_description}/{total}",
+            "price_range": f"${min(price_range):.2f} - ${max(price_range):.2f}" if price_range else "N/A",
+        },
+        "collections": {
+            "smart": len(smart.get("smart_collections", [])),
+            "custom": len(custom.get("custom_collections", [])),
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
-        db.commit()
-        logger.info(f"Synced {synced} products from Shopify")
-        return {"success": True, "synced": synced}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Shopify sync failed: {e}")
-        return {"success": False, "error": str(e)}
-    finally:
-        db.close()
+
+@router.get("/blog-posts", summary="List blog posts")
+def list_blog_posts():
+    """Get all blog posts for SEO tracking."""
+    blogs = _api("GET", "blogs.json?fields=id,title")
+    all_posts = []
+
+    for blog in blogs.get("blogs", []):
+        blog_id = blog["id"]
+        articles = _api("GET", f"blogs/{blog_id}/articles.json?fields=id,title,handle,published_at,tags")
+        for a in articles.get("articles", []):
+            all_posts.append({
+                "id": a["id"],
+                "blog_id": blog_id,
+                "blog_title": blog["title"],
+                "title": a["title"],
+                "handle": a.get("handle", ""),
+                "published_at": a.get("published_at"),
+                "tags": a.get("tags", ""),
+                "url": f"/blogs/{blog['title'].lower().replace(' ', '-')}/{a.get('handle', '')}",
+            })
+
+    return {"status": "ok", "count": len(all_posts), "posts": all_posts}
