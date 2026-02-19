@@ -5,10 +5,12 @@ by initializing one on first deploy.
 """
 
 import os
+import sys
 import hmac
 import hashlib
 import subprocess
 import logging
+import threading
 
 from fastapi import APIRouter, Request, HTTPException
 
@@ -85,6 +87,17 @@ def _verify_github_signature(payload_body: bytes, signature_header: str) -> bool
     return hmac.compare_digest(expected, signature_header)
 
 
+def _schedule_restart(delay: float = 2.0):
+    """Restart the Python process after a short delay so the HTTP response can be sent."""
+
+    def _restart():
+        logger.info("Restarting process with os.execv ...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    threading.Timer(delay, _restart).start()
+    logger.info(f"Process restart scheduled in {delay}s")
+
+
 @router.post("/pull", summary="Pull latest code from GitHub")
 async def deploy_pull(request: Request):
     """Webhook endpoint: pull latest code from GitHub main branch.
@@ -98,6 +111,9 @@ async def deploy_pull(request: Request):
         result = _do_fetch_reset()
         if result["success"]:
             logger.info(f"Deploy pull completed: {result.get('head', '')}")
+            _schedule_restart()
+            result["status"] = "restarting"
+            result["message"] = "Code updated. Process will restart in ~2s."
         return result
     except Exception as e:
         logger.error(f"Deploy pull failed: {e}")
@@ -137,7 +153,9 @@ async def github_webhook(request: Request):
         result = _do_fetch_reset()
         if result["success"]:
             logger.info(f"GitHub webhook deploy completed: {result.get('head', '')}")
-        return {"status": "pulled", **result}
+            _schedule_restart()
+            return {"status": "restarting", **result, "message": "Code updated. Process will restart in ~2s."}
+        return {"status": "error", **result}
     except Exception as e:
         logger.error(f"GitHub webhook deploy failed: {e}")
         return {"status": "error", "error": str(e)}
