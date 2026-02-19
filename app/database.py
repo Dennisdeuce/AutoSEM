@@ -1,10 +1,13 @@
 """Database configuration and SQLAlchemy models"""
 
 import os
+import logging
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Text, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Text, DateTime, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+
+logger = logging.getLogger("autosem.database")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./autosem.db")
 
@@ -31,6 +34,23 @@ Base = declarative_base()
 def init_db():
     """Create all database tables."""
     Base.metadata.create_all(bind=engine)
+    _run_migrations()
+
+
+def _run_migrations():
+    """Add missing columns to existing tables (safe to run multiple times)."""
+    migrations = [
+        ("campaigns", "impressions", "INTEGER DEFAULT 0"),
+        ("campaigns", "clicks", "INTEGER DEFAULT 0"),
+    ]
+    with engine.connect() as conn:
+        for table, column, col_type in migrations:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                conn.commit()
+                logger.info(f"Migration: added {table}.{column}")
+            except Exception:
+                conn.rollback()  # Column already exists, skip
 
 
 def get_db():
@@ -77,6 +97,8 @@ class CampaignModel(Base):
     daily_budget = Column(Float, nullable=True)
     target_cpa = Column(Float, nullable=True)
     target_roas = Column(Float, nullable=True)
+    impressions = Column(Integer, default=0)
+    clicks = Column(Integer, default=0)
     spend = Column(Float, default=0.0)
     revenue = Column(Float, default=0.0)
     total_spend = Column(Float, default=0.0)
