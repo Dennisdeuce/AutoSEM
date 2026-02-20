@@ -1,6 +1,6 @@
 """
 Meta Ads router - OAuth + Campaign Management
-v1.1.0 - Added activate, pause, set-budget endpoints
+v1.2.0 - Fixed set-budget to handle CBO (campaign-level budgets)
 """
 
 import os
@@ -31,6 +31,19 @@ def _get_active_token(db: Session) -> str:
     if token_record and token_record.access_token:
         return token_record.access_token
     return os.environ.get("META_ACCESS_TOKEN", "")
+
+
+def _appsecret_proof(token: str) -> str:
+    """Generate appsecret_proof for Meta API calls."""
+    import hashlib
+    import hmac
+    if not META_APP_SECRET:
+        return ""
+    return hmac.new(
+        META_APP_SECRET.encode("utf-8"),
+        token.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _log_activity(db: Session, action: str, entity_id: str = None, details: str = None):
@@ -242,6 +255,7 @@ def activate_campaign(req: CampaignActionRequest, db: Session = Depends(get_db))
             data={
                 "status": "ACTIVE",
                 "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
             },
             timeout=15,
         )
@@ -284,6 +298,7 @@ def pause_campaign(req: CampaignActionRequest, db: Session = Depends(get_db)):
             data={
                 "status": "PAUSED",
                 "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
             },
             timeout=15,
         )
@@ -314,19 +329,50 @@ def pause_campaign(req: CampaignActionRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/set-budget", summary="Set campaign daily budget",
-             description="Update daily budget on a campaign's ad sets. Budget in cents (1500 = $15.00)")
+             description="Update daily budget. Tries campaign-level first (CBO), then adset-level. Budget in cents (1500 = $15.00)")
 def set_campaign_budget(req: SetBudgetRequest, db: Session = Depends(get_db)):
     access_token = _get_active_token(db)
     if not access_token:
         return {"status": "error", "message": "No Meta token available"}
 
+    budget_dollars = req.daily_budget_cents / 100
+
     try:
-        # First, get ad sets under this campaign
+        # ── Step 1: Try campaign-level budget update (CBO campaigns) ──
+        campaign_resp = requests.post(
+            f"{META_GRAPH_BASE}/{req.campaign_id}",
+            data={
+                "daily_budget": req.daily_budget_cents,
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+        campaign_result = campaign_resp.json()
+
+        if campaign_resp.status_code == 200 and campaign_result.get("success"):
+            _log_activity(db, "META_BUDGET_SET", req.campaign_id,
+                         f"Campaign budget set to ${budget_dollars:.2f}/day ({req.daily_budget_cents} cents) — campaign level (CBO)")
+            logger.info(f"Campaign {req.campaign_id} budget set to ${budget_dollars:.2f}/day (campaign-level CBO)")
+            return {
+                "status": "updated",
+                "level": "campaign",
+                "campaign_id": req.campaign_id,
+                "budget_cents": req.daily_budget_cents,
+                "budget_dollars": budget_dollars,
+                "message": f"Campaign-level budget set to ${budget_dollars:.2f}/day",
+            }
+
+        # ── Step 2: Campaign-level failed — try adset-level ──
+        campaign_error = campaign_result.get("error", {}).get("message", "")
+        logger.info(f"Campaign-level budget update failed ({campaign_error}), trying adset-level...")
+
         adsets_resp = requests.get(
             f"{META_GRAPH_BASE}/{req.campaign_id}/adsets",
             params={
                 "fields": "id,name,daily_budget,status",
                 "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
             },
             timeout=15,
         )
@@ -335,7 +381,8 @@ def set_campaign_budget(req: SetBudgetRequest, db: Session = Depends(get_db)):
         if not adsets_data:
             return {
                 "status": "error",
-                "message": f"No ad sets found for campaign {req.campaign_id}",
+                "campaign_id": req.campaign_id,
+                "message": f"Campaign-level update failed ({campaign_error}) and no ad sets found",
             }
 
         updated = []
@@ -347,6 +394,7 @@ def set_campaign_budget(req: SetBudgetRequest, db: Session = Depends(get_db)):
                 data={
                     "daily_budget": req.daily_budget_cents,
                     "access_token": access_token,
+                    "appsecret_proof": _appsecret_proof(access_token),
                 },
                 timeout=15,
             )
@@ -357,12 +405,13 @@ def set_campaign_budget(req: SetBudgetRequest, db: Session = Depends(get_db)):
                 error_msg = result.get("error", {}).get("message", str(result))
                 errors.append({"adset_id": adset_id, "error": error_msg})
 
-        budget_dollars = req.daily_budget_cents / 100
-        _log_activity(db, "META_BUDGET_SET", req.campaign_id,
-                     f"Budget set to ${budget_dollars:.2f}/day ({req.daily_budget_cents} cents) on {len(updated)} ad sets")
+        if updated:
+            _log_activity(db, "META_BUDGET_SET", req.campaign_id,
+                         f"Budget set to ${budget_dollars:.2f}/day ({req.daily_budget_cents} cents) on {len(updated)} ad sets")
 
         return {
             "status": "updated" if updated else "error",
+            "level": "adset",
             "campaign_id": req.campaign_id,
             "budget_cents": req.daily_budget_cents,
             "budget_dollars": budget_dollars,
@@ -389,6 +438,7 @@ def list_meta_campaigns(db: Session = Depends(get_db)):
             params={
                 "fields": "id,name,status,daily_budget,lifetime_budget,objective",
                 "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
                 "limit": 100,
             },
             timeout=15,
