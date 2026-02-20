@@ -1,15 +1,17 @@
 """AutoSEM Scheduler
-Runs periodic optimization cycles and performance syncs.
+Runs periodic optimization cycles, performance syncs, and spend checks.
 Writes heartbeat timestamps to SettingsModel after each job.
 Logs start/end of each job to ActivityLogModel.
 
 Phase 8: Jobs use SessionLocal() directly instead of HTTP self-calls.
+Phase 11: Added midnight CST optimization cron, hourly spend check, tick logging.
 """
 import json
 import logging
 from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger("autosem.scheduler")
 
@@ -156,14 +158,84 @@ def sync_performance():
         logger.info(f"[{end_ts}] Performance sync finished ({status})")
 
 
+def check_hourly_spend():
+    """Hourly spend check: query active campaign budgets vs daily_spend_limit.
+
+    If total active daily budgets exceed the limit, log a SPEND_ALERT.
+    Uses NotificationService to record alerts.
+    """
+    ts = datetime.now(timezone.utc).isoformat()
+    logger.info(f"[{ts}] TICK: hourly_spend_check")
+    _log_job_activity("SCHEDULER_TICK", "hourly_spend_check")
+
+    from app.database import SessionLocal, CampaignModel, SettingsModel
+    db = SessionLocal()
+    try:
+        # Get daily spend limit from settings
+        limit_row = db.query(SettingsModel).filter(SettingsModel.key == "daily_spend_limit").first()
+        daily_limit = float(limit_row.value) if limit_row and limit_row.value else 200.0
+
+        # Sum daily budgets of active campaigns
+        active_campaigns = db.query(CampaignModel).filter(
+            CampaignModel.status.in_(["active", "live", "ACTIVE"])
+        ).all()
+        total_daily_budget = sum(c.daily_budget or 0 for c in active_campaigns)
+        total_spend_today = sum(c.total_spend or 0 for c in active_campaigns)
+
+        utilization = (total_daily_budget / daily_limit * 100) if daily_limit > 0 else 0
+
+        logger.info(
+            f"Spend check: {len(active_campaigns)} active campaigns, "
+            f"daily budget ${total_daily_budget:.2f} / ${daily_limit:.2f} limit "
+            f"({utilization:.0f}% utilized), total spend ${total_spend_today:.2f}"
+        )
+
+        # Alert if over 90% of daily limit
+        if total_daily_budget > daily_limit * 0.9:
+            from app.services.notifications import NotificationService
+            notifier = NotificationService(db)
+            notifier.notify_spend_alert(
+                "ALL_CAMPAIGNS",
+                total_daily_budget,
+                daily_limit,
+            )
+            logger.warning(
+                f"SPEND ALERT: Total daily budget ${total_daily_budget:.2f} "
+                f"exceeds 90% of ${daily_limit:.2f} limit"
+            )
+    except Exception as e:
+        logger.error(f"Hourly spend check failed: {e}")
+        db.rollback()
+    finally:
+        db.close()
+        _write_heartbeat("last_spend_check")
+
+
+def scheduler_tick():
+    """Lightweight tick logged every hour to prove scheduler is alive."""
+    ts = datetime.now(timezone.utc).isoformat()
+    logger.info(f"[{ts}] TICK: scheduler heartbeat")
+    _log_job_activity("SCHEDULER_TICK", f"heartbeat at {ts}")
+    _write_heartbeat("last_scheduler_tick")
+
+
 def start_scheduler():
     """Start the background scheduler."""
-    # Run optimization every 6 hours
+    # Daily optimization at midnight CST (06:00 UTC)
+    scheduler.add_job(
+        run_optimization_cycle,
+        trigger=CronTrigger(hour=6, minute=0, timezone="UTC"),
+        id="daily_optimization",
+        name="Daily Optimization (midnight CST)",
+        replace_existing=True,
+    )
+
+    # Also keep the 6-hour interval optimization for intra-day checks
     scheduler.add_job(
         run_optimization_cycle,
         trigger=IntervalTrigger(hours=6),
         id="optimization_cycle",
-        name="AutoSEM Optimization Cycle",
+        name="AutoSEM Optimization Cycle (6h)",
         replace_existing=True,
     )
 
@@ -173,6 +245,24 @@ def start_scheduler():
         trigger=IntervalTrigger(hours=2),
         id="performance_sync",
         name="Performance Data Sync",
+        replace_existing=True,
+    )
+
+    # Hourly spend check
+    scheduler.add_job(
+        check_hourly_spend,
+        trigger=IntervalTrigger(hours=1),
+        id="hourly_spend_check",
+        name="Hourly Spend Check",
+        replace_existing=True,
+    )
+
+    # Hourly scheduler tick (heartbeat proof-of-life)
+    scheduler.add_job(
+        scheduler_tick,
+        trigger=IntervalTrigger(hours=1, start_date=datetime.now(timezone.utc)),
+        id="scheduler_tick",
+        name="Scheduler Heartbeat Tick",
         replace_existing=True,
     )
 
