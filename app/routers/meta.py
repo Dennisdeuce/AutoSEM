@@ -1,11 +1,13 @@
 """
-Meta Ads router - OAuth + Campaign Management
-v1.2.0 - Fixed set-budget to handle CBO (campaign-level budgets)
+Meta Ads router - OAuth + Campaign Management + Ad Creative CRUD
+v2.1.0 - Added ad-level query endpoints and creative creation/update/delete
 """
 
 import os
+import json
 import logging
 import time
+from typing import Optional
 
 import requests
 from fastapi import APIRouter, Depends, Query
@@ -453,4 +455,275 @@ def list_meta_campaigns(db: Session = Depends(get_db)):
 
     except Exception as e:
         logger.error(f"Failed to list campaigns: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+# ─── Ad-Level Query Endpoints (Phase 10B) ────────────────────────
+
+@router.get("/campaigns/{campaign_id}/adsets", summary="List adsets for a campaign",
+            description="Get all ad sets under a Meta campaign with targeting and budget info")
+def list_campaign_adsets(campaign_id: str, db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+
+    try:
+        resp = requests.get(
+            f"{META_GRAPH_BASE}/{campaign_id}/adsets",
+            params={
+                "fields": "id,name,daily_budget,status,targeting,optimization_goal",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        adsets = resp.json().get("data", [])
+        return {"status": "ok", "campaign_id": campaign_id, "adsets": adsets}
+    except Exception as e:
+        logger.error(f"Failed to list adsets for campaign {campaign_id}: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/adsets/{adset_id}/ads", summary="List ads for an adset",
+            description="Get all ads under an adset with creative details")
+def list_adset_ads(adset_id: str, db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+
+    try:
+        resp = requests.get(
+            f"{META_GRAPH_BASE}/{adset_id}/ads",
+            params={
+                "fields": "id,name,status,creative{id,name,title,body,image_url,thumbnail_url,video_id,call_to_action_type,object_story_spec}",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        ads = resp.json().get("data", [])
+        return {"status": "ok", "adset_id": adset_id, "ads": ads}
+    except Exception as e:
+        logger.error(f"Failed to list ads for adset {adset_id}: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/campaigns/{campaign_id}/full-structure", summary="Full campaign structure",
+            description="Get campaign → adsets → ads tree in one call")
+def get_full_campaign_structure(campaign_id: str, db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+
+    try:
+        # Get campaign info
+        camp_resp = requests.get(
+            f"{META_GRAPH_BASE}/{campaign_id}",
+            params={
+                "fields": "id,name,status,daily_budget,lifetime_budget,objective",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+        camp_resp.raise_for_status()
+        campaign_data = camp_resp.json()
+
+        # Get adsets
+        adsets_resp = requests.get(
+            f"{META_GRAPH_BASE}/{campaign_id}/adsets",
+            params={
+                "fields": "id,name,daily_budget,status,targeting,optimization_goal",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+        adsets_resp.raise_for_status()
+        adsets = adsets_resp.json().get("data", [])
+
+        # Get ads for each adset
+        adset_tree = []
+        for adset in adsets:
+            ads_resp = requests.get(
+                f"{META_GRAPH_BASE}/{adset['id']}/ads",
+                params={
+                    "fields": "id,name,status,creative{id,name,title,body,image_url,thumbnail_url,video_id,call_to_action_type,object_story_spec}",
+                    "access_token": access_token,
+                    "appsecret_proof": _appsecret_proof(access_token),
+                },
+                timeout=15,
+            )
+            ads_resp.raise_for_status()
+            ads = ads_resp.json().get("data", [])
+            adset_tree.append({"adset": adset, "ads": ads})
+
+        return {
+            "status": "ok",
+            "campaign": campaign_data,
+            "adsets": adset_tree,
+        }
+    except Exception as e:
+        logger.error(f"Failed to get full structure for campaign {campaign_id}: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+# ─── Ad Creative CRUD (Phase 10B) ────────────────────────────────
+
+META_PAGE_ID = os.environ.get("META_PAGE_ID", "")
+
+
+class CreateAdRequest(BaseModel):
+    adset_id: str
+    name: str
+    image_url: str
+    primary_text: str
+    headline: str
+    description: str
+    link: str
+    cta: str = "SHOP_NOW"
+
+
+class UpdateAdRequest(BaseModel):
+    status: Optional[str] = None
+    name: Optional[str] = None
+
+
+@router.post("/create-ad", summary="Create a new ad with creative",
+             description="Create an AdCreative + Ad under the specified adset")
+def create_ad(req: CreateAdRequest, db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    ad_account_id = META_AD_ACCOUNT_ID
+    if not access_token or not ad_account_id:
+        return {"status": "error", "message": "Meta not configured"}
+
+    page_id = META_PAGE_ID
+    if not page_id:
+        return {"status": "error", "message": "META_PAGE_ID not configured"}
+
+    try:
+        # Step 1: Create AdCreative
+        object_story_spec = json.dumps({
+            "page_id": page_id,
+            "link_data": {
+                "image_hash": "",
+                "picture": req.image_url,
+                "link": req.link,
+                "message": req.primary_text,
+                "name": req.headline,
+                "description": req.description,
+                "call_to_action": {"type": req.cta, "value": {"link": req.link}},
+            },
+        })
+
+        creative_resp = requests.post(
+            f"{META_GRAPH_BASE}/act_{ad_account_id}/adcreatives",
+            data={
+                "name": f"Creative - {req.name}",
+                "object_story_spec": object_story_spec,
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=30,
+        )
+        creative_resp.raise_for_status()
+        creative_id = creative_resp.json().get("id")
+
+        if not creative_id:
+            return {"status": "error", "message": "Failed to create ad creative", "response": creative_resp.json()}
+
+        # Step 2: Create Ad
+        ad_resp = requests.post(
+            f"{META_GRAPH_BASE}/act_{ad_account_id}/ads",
+            data={
+                "name": req.name,
+                "adset_id": req.adset_id,
+                "creative": json.dumps({"creative_id": creative_id}),
+                "status": "ACTIVE",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=30,
+        )
+        ad_resp.raise_for_status()
+        ad_id = ad_resp.json().get("id")
+
+        _log_activity(db, "META_AD_CREATED", ad_id,
+                      f"Ad '{req.name}' created in adset {req.adset_id} with creative {creative_id}")
+
+        return {
+            "status": "created",
+            "ad_id": ad_id,
+            "creative_id": creative_id,
+            "adset_id": req.adset_id,
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to create ad: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.put("/ads/{ad_id}/update", summary="Update an ad",
+            description="Update ad status or name")
+def update_ad(ad_id: str, req: UpdateAdRequest, db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+
+    try:
+        update_data = {"access_token": access_token, "appsecret_proof": _appsecret_proof(access_token)}
+        if req.status:
+            update_data["status"] = req.status
+        if req.name:
+            update_data["name"] = req.name
+
+        resp = requests.post(
+            f"{META_GRAPH_BASE}/{ad_id}",
+            data=update_data,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+        if result.get("success"):
+            _log_activity(db, "META_AD_UPDATED", ad_id,
+                          f"Ad {ad_id} updated: status={req.status}, name={req.name}")
+            return {"status": "updated", "ad_id": ad_id}
+        else:
+            return {"status": "error", "ad_id": ad_id, "message": str(result)}
+
+    except Exception as e:
+        logger.error(f"Failed to update ad {ad_id}: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.delete("/ads/{ad_id}", summary="Delete an ad",
+               description="Delete an underperforming ad")
+def delete_ad(ad_id: str, db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+
+    try:
+        resp = requests.delete(
+            f"{META_GRAPH_BASE}/{ad_id}",
+            params={
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+        if result.get("success"):
+            _log_activity(db, "META_AD_DELETED", ad_id, f"Ad {ad_id} deleted")
+            return {"status": "deleted", "ad_id": ad_id}
+        else:
+            return {"status": "error", "ad_id": ad_id, "message": str(result)}
+
+    except Exception as e:
+        logger.error(f"Failed to delete ad {ad_id}: {e}")
         return {"status": "error", "message": str(e)}
