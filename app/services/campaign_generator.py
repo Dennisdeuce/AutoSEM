@@ -20,19 +20,15 @@ class CampaignGenerator:
         self.settings = self._load_settings()
 
     def _load_settings(self) -> dict:
-        settings = self.db.query(SettingsModel).first()
-        if settings:
-            return {
-                "daily_spend_limit": settings.daily_spend_limit,
-                "monthly_spend_limit": settings.monthly_spend_limit,
-                "min_roas_threshold": settings.min_roas_threshold,
-                "emergency_pause_loss": settings.emergency_pause_loss,
-            }
+        """Load settings from SettingsModel key/value store."""
+        def _get(key, default):
+            row = self.db.query(SettingsModel).filter(SettingsModel.key == key).first()
+            return float(row.value) if row and row.value else default
         return {
-            "daily_spend_limit": 200.0,
-            "monthly_spend_limit": 5000.0,
-            "min_roas_threshold": 1.5,
-            "emergency_pause_loss": 500.0,
+            "daily_spend_limit": _get("daily_spend_limit", 200.0),
+            "monthly_spend_limit": _get("monthly_spend_limit", 5000.0),
+            "min_roas_threshold": _get("min_roas_threshold", 1.5),
+            "emergency_pause_loss": _get("emergency_pause_loss", 500.0),
         }
 
     def generate_campaigns(self, platform: str = "both") -> List[Dict]:
