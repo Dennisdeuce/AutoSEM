@@ -64,10 +64,18 @@ class CampaignOptimizer:
                 result[key] = default
         return result
 
+    # All status values considered "active" (case variants from different sources)
+    ACTIVE_STATUSES = ["active", "ACTIVE", "live", "LIVE"]
+
     def optimize_all(self) -> Dict:
         campaigns = self.db.query(CampaignModel).filter(
-            CampaignModel.status.in_(["active", "live"])
+            CampaignModel.status.in_(self.ACTIVE_STATUSES)
         ).all()
+
+        logger.info(
+            f"Optimizer found {len(campaigns)} active campaigns: "
+            + ", ".join(f"id={c.id} '{c.name[:30]}' status={c.status} impr={c.impressions} clicks={c.clicks}" for c in campaigns)
+        )
 
         if not campaigns:
             return {"optimized": 0, "actions": [], "message": "No active campaigns to optimize"}

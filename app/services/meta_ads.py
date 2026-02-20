@@ -237,6 +237,29 @@ class MetaAdsService:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def _get_campaign_metadata(self) -> Dict[str, Dict]:
+        """Fetch status and daily_budget for all campaigns in the ad account.
+
+        Returns a dict keyed by campaign_id with values {status, daily_budget}.
+        """
+        try:
+            params = {
+                "fields": "id,status,daily_budget",
+                "limit": "100",
+                **self._auth_params(),
+            }
+            data = self._api_get(f"act_{self.ad_account_id}/campaigns", params=params)
+            result = {}
+            for c in data.get("data", []):
+                result[c["id"]] = {
+                    "campaign_status": c.get("status", "").upper(),
+                    "daily_budget": int(c.get("daily_budget", 0)),
+                }
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to fetch campaign metadata: {e}")
+            return {}
+
     def get_performance(self, campaign_id: str = None, days: int = 7) -> List[Dict]:
         if not self.is_configured:
             return []
@@ -260,6 +283,9 @@ class MetaAdsService:
             response.raise_for_status()
             data = response.json().get("data", [])
 
+            # Fetch campaign-level metadata (status, daily_budget) separately
+            campaign_meta = self._get_campaign_metadata()
+
             results = []
             for row in data:
                 conversions = 0
@@ -271,8 +297,11 @@ class MetaAdsService:
                     if action_value.get("action_type") == "purchase":
                         revenue = float(action_value.get("value", 0))
 
+                cid = row.get("campaign_id")
+                meta = campaign_meta.get(cid, {})
+
                 results.append({
-                    "campaign_id": row.get("campaign_id"),
+                    "campaign_id": cid,
                     "campaign_name": row.get("campaign_name"),
                     "impressions": int(row.get("impressions", 0)),
                     "clicks": int(row.get("clicks", 0)),
@@ -282,6 +311,8 @@ class MetaAdsService:
                     "cpc": float(row.get("cpc", 0)),
                     "conversions": conversions,
                     "revenue": revenue,
+                    "campaign_status": meta.get("campaign_status", ""),
+                    "daily_budget": meta.get("daily_budget", 0),
                 })
 
             return results

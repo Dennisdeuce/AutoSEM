@@ -108,11 +108,20 @@ class PerformanceSyncService:
                     campaign.revenue = revenue
                     campaign.total_revenue = revenue
                     campaign.roas = round(roas, 2)
+                    # Normalize status to lowercase for consistent optimizer matching
+                    meta_status = row.get("campaign_status", "").lower()
+                    if meta_status in ("active", "paused", "deleted", "archived"):
+                        campaign.status = meta_status
+                    elif campaign.status and campaign.status.upper() == campaign.status:
+                        # Fix any existing UPPERCASE status to lowercase
+                        campaign.status = campaign.status.lower()
                     # Sync daily_budget from Meta (returned in cents)
                     raw_budget = row.get("daily_budget", 0)
                     if raw_budget:
                         campaign.daily_budget = float(raw_budget) / 100
                     campaign.updated_at = datetime.now(timezone.utc)
+                    logger.info(f"Wrote to campaign {campaign.id}: impr={impressions}, "
+                                f"clicks={clicks}, spend=${spend:.2f}, status={campaign.status}")
                     synced += 1
                     details.append(
                         f"{campaign.name[:30]}: ${spend:.2f} spend, {clicks} clicks, "
