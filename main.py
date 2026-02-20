@@ -1,5 +1,7 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v1.10.0 - Phase 10: Close the data loop — fix PerformanceSyncService DB token,
+          CBO budget updates, manual optimizer trigger, campaign cleanup
 v1.9.0 - Phase 9: Order webhook handler with UTM attribution, discount code
          generation, customer data endpoint, dashboard revenue display
 v1.8.0 - Phase 8: Deploy restart fix, scheduler DB session, dashboard SEO tab,

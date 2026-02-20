@@ -133,6 +133,19 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
     <div class="card"><div class="lbl">Shopify Token</div><div class="val" id="ov-token">—</div><div class="note" id="ov-token-note"></div></div>
   </div>
 
+  <div style="display:flex;justify-content:space-between;align-items:center;margin:20px 0 12px">
+    <span style="font-size:15px;font-weight:600;color:var(--dim)">Last Optimizer Actions</span>
+    <div style="display:flex;gap:8px">
+      <button onclick="runSyncPerformance()" style="background:var(--blue-bg);color:var(--blue);border:1px solid rgba(88,166,255,0.3);padding:6px 14px;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer">↻ Sync Performance</button>
+      <button onclick="runOptimizeNow()" style="background:var(--green-bg);color:var(--green);border:1px solid rgba(63,185,80,0.3);padding:6px 14px;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer">▶ Optimize Now</button>
+    </div>
+  </div>
+  <div id="optimizerStatus" style="font-size:12px;color:var(--dim);margin-bottom:8px"></div>
+  <table class="tbl">
+    <thead><tr><th>Time</th><th>Action</th><th>Campaign</th><th>Details</th></tr></thead>
+    <tbody id="optimizerRows"><tr><td colspan="4" class="loading">Loading optimizer actions</td></tr></tbody>
+  </table>
+
   <div style="font-size:15px;font-weight:600;margin:20px 0 12px;color:var(--dim)">Optimization Progress</div>
   <div id="overviewProgress">
     <div class="prog"><div class="prog-lbl">Overall</div><div class="prog-track"><div class="prog-fill" id="prog-overall" style="width:0%;background:rgba(63,185,80,0.6)"></div></div></div>
@@ -861,9 +874,82 @@ async function generateAllJsonLd() {
   }
 }
 
+// ─── Optimizer Actions ───
+async function loadOptimizerActions() {
+  try {
+    const resp = await fetch(API + '/automation/activity-log?limit=50');
+    const data = await resp.json();
+    const logs = (data.logs || []).filter(l =>
+      l.action === 'AUTO_OPTIMIZE' || l.action === 'MANUAL_OPTIMIZE' ||
+      l.action === 'SCHEDULER_OPTIMIZE' || l.action === 'PERFORMANCE_SYNC'
+    ).slice(0, 10);
+    let html = '';
+    logs.forEach(l => {
+      const ts = l.timestamp ? new Date(l.timestamp).toLocaleString() : '—';
+      const actionColor = l.action === 'AUTO_OPTIMIZE' ? 'b' : l.action === 'MANUAL_OPTIMIZE' ? 'g' : '';
+      const campId = l.entity_id || '—';
+      html += `<tr>
+        <td class="mono" style="white-space:nowrap;font-size:12px">${ts}</td>
+        <td class="mono ${actionColor}" style="font-size:12px">${l.action}</td>
+        <td class="mono" style="font-size:12px">${campId}</td>
+        <td style="font-size:12px;max-width:350px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.details || '—'}</td>
+      </tr>`;
+    });
+    $('optimizerRows').innerHTML = html || '<tr><td colspan="4" style="color:var(--dim)">No optimizer actions yet. Click "Optimize Now" to trigger.</td></tr>';
+  } catch(e) {
+    $('optimizerRows').innerHTML = '<tr><td colspan="4" style="color:var(--dim)">Could not load optimizer log</td></tr>';
+  }
+}
+
+async function runOptimizeNow() {
+  const status = $('optimizerStatus');
+  status.textContent = 'Running optimizer...';
+  status.style.color = 'var(--blue)';
+  try {
+    const resp = await fetch(API + '/dashboard/optimize-now', { method: 'POST' });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      const actionCount = (data.actions || []).length;
+      status.textContent = 'Done: ' + data.optimized + ' campaigns, ' + actionCount + ' actions';
+      status.style.color = 'var(--green)';
+      loadOptimizerActions();
+      loadMeta();
+    } else {
+      status.textContent = 'Error: ' + (data.message || 'unknown');
+      status.style.color = 'var(--red)';
+    }
+  } catch(e) {
+    status.textContent = 'Failed: ' + e.message;
+    status.style.color = 'var(--red)';
+  }
+}
+
+async function runSyncPerformance() {
+  const status = $('optimizerStatus');
+  status.textContent = 'Syncing performance data...';
+  status.style.color = 'var(--blue)';
+  try {
+    const resp = await fetch(API + '/dashboard/sync-performance', { method: 'POST' });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      const meta = data.results?.meta || {};
+      status.textContent = 'Synced: ' + (meta.campaigns_synced || 0) + ' campaigns from Meta';
+      status.style.color = 'var(--green)';
+      loadMeta();
+      loadOptimizerActions();
+    } else {
+      status.textContent = 'Error: ' + (data.message || 'unknown');
+      status.style.color = 'var(--red)';
+    }
+  } catch(e) {
+    status.textContent = 'Failed: ' + e.message;
+    status.style.color = 'var(--red)';
+  }
+}
+
 // ─── Init ───
 async function refreshAll() {
-  await Promise.all([loadHealth(), loadMeta(), loadShopify(), loadKlaviyo(), loadDeepHealth(), loadAutomationStatus(), loadActivityLog(), loadShopifyScopes()]);
+  await Promise.all([loadHealth(), loadMeta(), loadShopify(), loadKlaviyo(), loadDeepHealth(), loadAutomationStatus(), loadActivityLog(), loadShopifyScopes(), loadOptimizerActions()]);
   updateTime();
 }
 

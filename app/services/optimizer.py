@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
-from app.database import CampaignModel, SettingsModel, ActivityLogModel
+from app.database import CampaignModel, SettingsModel, ActivityLogModel, MetaTokenModel
 from app.services.meta_ads import MetaAdsService
 
 logger = logging.getLogger("autosem.optimizer")
@@ -31,7 +31,19 @@ class CampaignOptimizer:
     def __init__(self, db: Session):
         self.db = db
         self.meta = MetaAdsService()
+        self._load_db_token()
         self.settings = self._load_settings()
+
+    def _load_db_token(self):
+        """Load Meta token from DB if env var is empty."""
+        try:
+            if not self.meta.access_token:
+                token_record = self.db.query(MetaTokenModel).first()
+                if token_record and token_record.access_token:
+                    self.meta.update_token(token_record.access_token)
+                    logger.info("Optimizer: loaded Meta token from DB")
+        except Exception as e:
+            logger.warning(f"Optimizer: failed to load Meta token from DB: {e}")
 
     def _load_settings(self) -> dict:
         settings = self.db.query(SettingsModel).first()
@@ -93,15 +105,23 @@ class CampaignOptimizer:
         return result
 
     def _execute_meta_budget_change(self, campaign: CampaignModel, new_budget: float, reason: str) -> Dict:
-        """Change budget on a Meta campaign's adset via the API."""
+        """Change budget on a Meta campaign. Tries campaign-level (CBO) first, falls back to adset."""
         result = {"executed": False}
         if campaign.platform == "meta" and campaign.platform_campaign_id:
-            adset_id = self._get_adset_id(campaign)
-            if adset_id:
-                api_result = self.meta.update_adset_budget(adset_id, new_budget)
-                result = {"executed": api_result.get("success", False), "adset_id": adset_id, "api_result": api_result}
+            # Step 1: Try campaign-level budget (CBO)
+            cbo_result = self.meta.update_campaign_budget_cbo(campaign.platform_campaign_id, new_budget)
+            if cbo_result.get("success"):
+                result = {"executed": True, "level": "campaign", "api_result": cbo_result}
             else:
-                logger.warning(f"No adset found for campaign {campaign.platform_campaign_id} — budget change local only")
+                # Step 2: Fall back to adset-level budget
+                logger.info(f"CBO budget failed for {campaign.platform_campaign_id}, trying adset-level")
+                adset_id = self._get_adset_id(campaign)
+                if adset_id:
+                    api_result = self.meta.update_adset_budget(adset_id, new_budget)
+                    result = {"executed": api_result.get("success", False), "level": "adset",
+                              "adset_id": adset_id, "api_result": api_result}
+                else:
+                    logger.warning(f"No adset found for campaign {campaign.platform_campaign_id} — budget change local only")
         old_budget = campaign.daily_budget
         campaign.daily_budget = round(new_budget, 2)
         self._log_auto_optimize(campaign, "budget_change", f"{reason} (${old_budget} -> ${new_budget:.2f})")

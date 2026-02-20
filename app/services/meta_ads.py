@@ -250,7 +250,7 @@ class MetaAdsService:
             endpoint = f"act_{self.ad_account_id}/insights" if not campaign_id else f"{campaign_id}/insights"
 
             params = {
-                "fields": "campaign_id,campaign_name,impressions,clicks,spend,actions,action_values",
+                "fields": "campaign_id,campaign_name,impressions,clicks,spend,reach,ctr,cpc,actions,action_values",
                 "time_range": f'{{"since":"{start_date}","until":"{end_date}"}}',
                 "level": "campaign",
                 **self._auth_params(),
@@ -277,6 +277,9 @@ class MetaAdsService:
                     "impressions": int(row.get("impressions", 0)),
                     "clicks": int(row.get("clicks", 0)),
                     "spend": float(row.get("spend", 0)),
+                    "reach": int(row.get("reach", 0)),
+                    "ctr": float(row.get("ctr", 0)),
+                    "cpc": float(row.get("cpc", 0)),
                     "conversions": conversions,
                     "revenue": revenue,
                 })
@@ -304,6 +307,25 @@ class MetaAdsService:
         except Exception as e:
             logger.error(f"Failed to fetch adsets for campaign {campaign_id}: {e}")
             return []
+
+    def update_campaign_budget_cbo(self, campaign_id: str, new_budget_dollars: float) -> Dict:
+        """Update daily budget at the campaign level (for CBO campaigns).
+        Budget is sent in cents. Calls POST /{campaign_id} with daily_budget={cents}.
+        """
+        if not self.is_configured:
+            return {"success": False, "error": "Meta not configured"}
+
+        try:
+            budget_cents = int(new_budget_dollars * 100)
+            data = self._api_post(campaign_id, data={
+                "daily_budget": budget_cents,
+                **self._auth_params(),
+            })
+            logger.info(f"Updated campaign {campaign_id} budget to ${new_budget_dollars:.2f} (CBO, {budget_cents} cents)")
+            return {"success": True, "level": "campaign", "campaign_id": campaign_id, "new_budget": new_budget_dollars}
+        except Exception as e:
+            logger.warning(f"Campaign-level budget update failed for {campaign_id}: {e}")
+            return {"success": False, "error": str(e)}
 
     def update_adset_budget(self, adset_id: str, new_budget_dollars: float) -> Dict:
         """Update daily budget on an ad set.

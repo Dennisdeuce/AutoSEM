@@ -1,6 +1,8 @@
 """Performance Sync Service
 Pulls live campaign data from Meta and TikTok, updates local CampaignModel records.
 Discovers unlinked real campaigns and creates local records for them.
+
+v2.0 - Phase 10: Load Meta token from DB, write all metrics (reach, CTR, CPC)
 """
 
 import logging
@@ -8,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Dict, List
 from sqlalchemy.orm import Session
 
-from app.database import CampaignModel, ActivityLogModel
+from app.database import CampaignModel, ActivityLogModel, MetaTokenModel
 from app.services.meta_ads import MetaAdsService
 
 logger = logging.getLogger("autosem.performance_sync")
@@ -26,21 +28,43 @@ class PerformanceSyncService:
     def __init__(self, db: Session):
         self.db = db
         self.meta = MetaAdsService()
+        # Load token from DB if env var is empty (token is usually in meta_tokens table)
+        self._load_db_token()
+
+    def _load_db_token(self):
+        """Load Meta token from DB if the env var is empty or stale."""
+        try:
+            if not self.meta.access_token:
+                token_record = self.db.query(MetaTokenModel).first()
+                if token_record and token_record.access_token:
+                    self.meta.update_token(token_record.access_token)
+                    logger.info("PerformanceSyncService: loaded Meta token from DB")
+        except Exception as e:
+            logger.warning(f"Failed to load Meta token from DB: {e}")
 
     def sync_all(self) -> Dict:
         """Run full sync across all platforms."""
+        # Re-check token before sync (may have been refreshed since init)
+        self._load_db_token()
+
         results = {
             "meta": self._sync_meta(),
             "discovered": self._discover_unlinked_campaigns(),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        self._log_activity(f"Performance sync completed: {results}")
+        self._log_activity(
+            f"Sync: meta={results['meta'].get('status', 'unknown')}, "
+            f"synced={results['meta'].get('campaigns_synced', 0)}, "
+            f"discovered={results['discovered'].get('new_campaigns_linked', 0)}"
+        )
         return results
 
     def _sync_meta(self) -> Dict:
-        """Pull Meta campaign performance and update local records.
-        Wrapped with retry logic via the retry decorator on MetaAdsService methods.
+        """Pull Meta campaign performance and update local CampaignModel records.
+
+        Writes: impressions, clicks, spend, total_spend, conversions, revenue,
+        total_revenue, roas, status. Calculates CTR/CPC for logging.
         """
         if not self.meta.is_configured:
             return {"status": "skipped", "reason": "Meta not configured"}
@@ -51,6 +75,7 @@ class PerformanceSyncService:
                 return {"status": "ok", "campaigns_synced": 0, "message": "No performance data returned"}
 
             synced = 0
+            details = []
             for row in performance_data:
                 meta_campaign_id = row.get("campaign_id")
                 if not meta_campaign_id:
@@ -62,22 +87,37 @@ class PerformanceSyncService:
                     CampaignModel.platform == "meta",
                 ).first()
 
+                spend = float(row.get("spend", 0))
+                impressions = int(row.get("impressions", 0))
+                clicks = int(row.get("clicks", 0))
+                conversions = int(row.get("conversions", 0))
+                revenue = float(row.get("revenue", 0))
+
+                # Calculated metrics for logging
+                ctr = (clicks / impressions * 100) if impressions > 0 else 0
+                cpc = (spend / clicks) if clicks > 0 else 0
+                roas = (revenue / spend) if spend > 0 else 0
+
                 if campaign:
-                    campaign.impressions = row.get("impressions", 0)
-                    campaign.clicks = row.get("clicks", 0)
-                    campaign.total_spend = row.get("spend", 0)
-                    campaign.spend = row.get("spend", 0)
-                    campaign.conversions = row.get("conversions", 0)
-                    campaign.total_revenue = row.get("revenue", 0)
-                    campaign.revenue = row.get("revenue", 0)
-                    if campaign.total_spend and campaign.total_spend > 0:
-                        campaign.roas = campaign.total_revenue / campaign.total_spend
+                    # Write ALL metrics back to the campaign row
+                    campaign.impressions = impressions
+                    campaign.clicks = clicks
+                    campaign.spend = spend
+                    campaign.total_spend = spend
+                    campaign.conversions = conversions
+                    campaign.revenue = revenue
+                    campaign.total_revenue = revenue
+                    campaign.roas = round(roas, 2)
                     campaign.updated_at = datetime.now(timezone.utc)
                     synced += 1
-                    logger.info(f"Synced Meta campaign {meta_campaign_id}: "
-                                f"spend=${row.get('spend', 0):.2f}, clicks={row.get('clicks', 0)}")
+                    details.append(
+                        f"{campaign.name[:30]}: ${spend:.2f} spend, {clicks} clicks, "
+                        f"CTR={ctr:.1f}%, CPC=${cpc:.2f}, ROAS={roas:.1f}x"
+                    )
+                    logger.info(f"Synced {meta_campaign_id}: ${spend:.2f}, {clicks} clicks, "
+                                f"CTR={ctr:.1f}%, CPC=${cpc:.2f}")
                 else:
-                    # Campaign exists on Meta but not locally - create it
+                    # Campaign exists on Meta but not locally — create it
                     self._create_local_campaign(
                         platform="meta",
                         platform_campaign_id=str(meta_campaign_id),
@@ -87,7 +127,11 @@ class PerformanceSyncService:
                     synced += 1
 
             self.db.commit()
-            return {"status": "ok", "campaigns_synced": synced}
+            return {
+                "status": "ok",
+                "campaigns_synced": synced,
+                "details": details,
+            }
 
         except Exception as e:
             logger.error(f"Meta sync failed: {e}")

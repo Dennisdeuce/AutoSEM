@@ -304,6 +304,54 @@ def sync_meta_performance(db: Session = Depends(get_db)):
     return {"status": "synced", "campaigns_synced": synced, "summary": perf.get("summary")}
 
 
+@router.post("/optimize-now", summary="Run optimizer manually",
+             description="Trigger CampaignOptimizer.optimize_all() on demand — returns actions taken")
+def optimize_now(db: Session = Depends(get_db)):
+    """Run the optimization engine immediately without waiting for the 6h scheduler."""
+    try:
+        from app.services.optimizer import CampaignOptimizer
+        optimizer = CampaignOptimizer(db)
+        results = optimizer.optimize_all()
+
+        # Log the manual trigger
+        action_summary = ", ".join(
+            f"{a.get('action', 'unknown')}(campaign={a.get('campaign_id', '?')})"
+            for a in results.get("actions", [])[:5]
+        )
+        log = ActivityLogModel(
+            action="MANUAL_OPTIMIZE",
+            entity_type="system",
+            details=f"Manual trigger: {results.get('optimized', 0)} campaigns, "
+                    f"actions: {action_summary or 'none'}",
+        )
+        db.add(log)
+        db.commit()
+
+        return {
+            "status": "ok",
+            "optimized": results.get("optimized", 0),
+            "actions": results.get("actions", []),
+            "timestamp": results.get("timestamp"),
+        }
+    except Exception as e:
+        logger.error(f"Manual optimization failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/sync-performance", summary="Run performance sync manually",
+             description="Trigger PerformanceSyncService.sync_all() to pull latest Meta data")
+def sync_performance(db: Session = Depends(get_db)):
+    """Pull latest performance data from Meta and update local campaign records."""
+    try:
+        from app.services.performance_sync import PerformanceSyncService
+        sync_svc = PerformanceSyncService(db)
+        results = sync_svc.sync_all()
+        return {"status": "ok", "results": results}
+    except Exception as e:
+        logger.error(f"Manual performance sync failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 @router.post("/fix-data", summary="Fix Database Data")
 def fix_database_data(db: Session = Depends(get_db)):
     fixed = 0

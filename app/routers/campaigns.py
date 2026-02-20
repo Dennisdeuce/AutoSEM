@@ -8,11 +8,52 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.database import get_db, CampaignModel
+from app.database import get_db, CampaignModel, ActivityLogModel
 from app.schemas import Campaign, CampaignCreate, CampaignUpdate
 
 logger = logging.getLogger("AutoSEM.Campaigns")
 router = APIRouter()
+
+
+@router.post("/cleanup", summary="Clean up stale campaigns",
+             description="Delete campaigns with $0 spend and status not active. Removes phantom/stale records.")
+def cleanup_campaigns(db: Session = Depends(get_db)):
+    """Remove stale campaigns: $0 spend AND not active status."""
+    stale = db.query(CampaignModel).filter(
+        ~CampaignModel.status.in_(["active", "ACTIVE", "live"]),
+        (CampaignModel.total_spend == None) | (CampaignModel.total_spend == 0),
+        (CampaignModel.spend == None) | (CampaignModel.spend == 0),
+    ).all()
+
+    deleted_count = len(stale)
+    deleted_names = []
+    for c in stale:
+        deleted_names.append(f"{c.name} (id={c.id}, platform={c.platform}, status={c.status})")
+        db.delete(c)
+
+    if deleted_count > 0:
+        log = ActivityLogModel(
+            action="CAMPAIGN_CLEANUP",
+            entity_type="system",
+            details=f"Deleted {deleted_count} stale campaigns with $0 spend",
+        )
+        db.add(log)
+
+    db.commit()
+
+    # Count remaining
+    remaining = db.query(CampaignModel).count()
+    active = db.query(CampaignModel).filter(
+        CampaignModel.status.in_(["active", "ACTIVE", "live"])
+    ).count()
+
+    return {
+        "status": "ok",
+        "deleted": deleted_count,
+        "deleted_campaigns": deleted_names[:20],  # Cap output
+        "remaining": remaining,
+        "active": active,
+    }
 
 
 @router.get("/", response_model=List[Campaign])
