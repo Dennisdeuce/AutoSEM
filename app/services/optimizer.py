@@ -165,9 +165,11 @@ class CampaignOptimizer:
         cpc = spend / clicks if clicks > 0 else 0
 
         # --- Actionable rule: pause_underperformer ---
-        # ROAS < 0.5 after $20+ spend -> auto-pause
-        if spend >= 20 and roas < 0.5:
-            reason = f"ROAS {roas:.2f}x < 0.5 after ${spend:.2f} spend — auto-pausing"
+        # Only enforce ROAS-based pause when min_roas_threshold > 0 (not in awareness mode)
+        # Uses half of min_roas_threshold as floor, with absolute minimum of 0.5
+        roas_pause_threshold = min(self.settings["min_roas_threshold"] * 0.33, 0.5) if self.settings["min_roas_threshold"] > 0 else 0
+        if roas_pause_threshold > 0 and spend >= 20 and roas < roas_pause_threshold:
+            reason = f"ROAS {roas:.2f}x < {roas_pause_threshold:.2f} after ${spend:.2f} spend — auto-pausing"
             result = self._execute_meta_pause(campaign, reason)
             actions.append({
                 "campaign_id": campaign.id,
@@ -177,6 +179,13 @@ class CampaignOptimizer:
             })
             campaign.updated_at = datetime.utcnow()
             return actions  # Paused — no further optimization needed
+        elif roas_pause_threshold == 0 and spend >= 20 and roas == 0:
+            # Awareness mode: log but don't pause
+            actions.append({
+                "campaign_id": campaign.id,
+                "action": "awareness_mode",
+                "reason": f"ROAS {roas:.2f}x with ${spend:.2f} spend — awareness mode active (min_roas_threshold=0), not pausing",
+            })
 
         # --- Actionable rule: flag_landing_page with CPC thresholds ---
         if clicks >= self.MIN_CLICKS_FOR_DECISION and ctr > self.HIGH_CTR_THRESHOLD and conversion_rate < self.LOW_CONVERSION_RATE:
@@ -221,8 +230,8 @@ class CampaignOptimizer:
                     "executed": result.get("executed", False),
                 })
 
-        # --- Existing ROAS-based budget adjustments ---
-        if spend > 20:
+        # --- Existing ROAS-based budget adjustments (only when threshold > 0) ---
+        if spend > 20 and self.settings["min_roas_threshold"] > 0:
             if roas >= self.settings["min_roas_threshold"] * 1.5:
                 new_budget = min(
                     (campaign.daily_budget or 10) * self.BUDGET_INCREASE_FACTOR,
