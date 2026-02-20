@@ -1,11 +1,15 @@
 """
-Campaigns API router - Campaign CRUD operations
+Campaigns API router - Campaign CRUD operations + AI ad copy generation
 """
 
+import os
+import json
 import logging
-from typing import List
+from typing import List, Optional
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db, CampaignModel, ActivityLogModel
@@ -13,6 +17,17 @@ from app.schemas import Campaign, CampaignCreate, CampaignUpdate
 
 logger = logging.getLogger("AutoSEM.Campaigns")
 router = APIRouter()
+
+
+# ─── Ad Copy Generation Models ────────────────────────────────────
+
+class GenerateAdCopyRequest(BaseModel):
+    product_name: str
+    product_description: Optional[str] = None
+    product_price: Optional[float] = None
+    product_url: Optional[str] = None
+    target_audience: Optional[str] = "tennis and pickleball players"
+    platform: str = "meta"
 
 
 @router.delete("/cleanup", summary="Purge phantom campaigns",
@@ -101,3 +116,111 @@ def update_campaign(campaign_id: int, campaign: CampaignUpdate, db: Session = De
     db.refresh(db_campaign)
     logger.info(f"Updated campaign {campaign_id}: {db_campaign.name}")
     return db_campaign
+
+
+# ─── AI Ad Copy Generation ────────────────────────────────────────
+
+AD_COPY_SYSTEM_PROMPT = """You are an expert digital advertising copywriter for Court Sportswear, a tennis and pickleball apparel e-commerce brand. You write high-converting Meta (Facebook/Instagram) ad copy.
+
+Rules:
+- Headlines: max 40 characters, punchy and benefit-driven
+- Primary text: 2-3 sentences, emphasize comfort/performance/style
+- Description: 1 sentence, include a clear CTA
+- Always mention free shipping if applicable
+- Use active voice, avoid superlatives like "best" or "amazing"
+- Target audience: tennis and pickleball players who value quality athletic wear
+
+Return ONLY valid JSON — no markdown, no code fences, no explanation.
+Return an array of exactly 3 variant objects, each with keys: headline, primary_text, description, cta"""
+
+
+@router.post("/generate", summary="Generate AI ad copy variants",
+             description="Uses Claude API to generate 3 ad copy variants for a product. "
+                         "Stores winning copy in campaign headlines/descriptions fields.")
+def generate_ad_copy(req: GenerateAdCopyRequest, db: Session = Depends(get_db)):
+    """Generate 3 ad copy variants for a product using Claude AI."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {"status": "error", "message": "ANTHROPIC_API_KEY not configured"}
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+
+        user_prompt = f"""Generate 3 ad copy variants for this product:
+
+Product: {req.product_name}
+Description: {req.product_description or 'N/A'}
+Price: ${req.product_price:.2f if req.product_price else 'N/A'}
+URL: {req.product_url or 'https://court-sportswear.com'}
+Target audience: {req.target_audience}
+Platform: {req.platform}
+
+Return JSON array of 3 variants. Each variant must have: headline, primary_text, description, cta"""
+
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=1024,
+            system=AD_COPY_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+
+        raw_text = response.content[0].text.strip()
+
+        # Parse the JSON response
+        try:
+            variants = json.loads(raw_text)
+        except json.JSONDecodeError:
+            # Try to extract JSON from potential markdown fences
+            if "```" in raw_text:
+                json_block = raw_text.split("```")[1]
+                if json_block.startswith("json"):
+                    json_block = json_block[4:]
+                variants = json.loads(json_block.strip())
+            else:
+                return {
+                    "status": "error",
+                    "message": "Failed to parse AI response as JSON",
+                    "raw_response": raw_text[:500],
+                }
+
+        if not isinstance(variants, list) or len(variants) == 0:
+            return {"status": "error", "message": "AI returned invalid format", "raw_response": raw_text[:500]}
+
+        # Store the best variant (first one) in a new draft campaign
+        best = variants[0]
+        campaign = CampaignModel(
+            platform=req.platform,
+            name=f"AI: {req.product_name[:50]}",
+            status="draft",
+            campaign_type="ai_generated",
+            daily_budget=5.0,
+            headlines=json.dumps([v.get("headline", "") for v in variants]),
+            descriptions=json.dumps([v.get("primary_text", "") for v in variants]),
+        )
+        db.add(campaign)
+
+        # Log the generation
+        log = ActivityLogModel(
+            action="AI_AD_COPY_GENERATED",
+            entity_type="campaign",
+            details=f"Generated 3 variants for '{req.product_name}' via Claude API",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(campaign)
+
+        return {
+            "status": "ok",
+            "campaign_id": campaign.id,
+            "variants": variants,
+            "model_used": "claude-haiku-4-5",
+            "tokens_used": {
+                "input": response.usage.input_tokens,
+                "output": response.usage.output_tokens,
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"Ad copy generation failed: {e}")
+        return {"status": "error", "message": str(e)}
