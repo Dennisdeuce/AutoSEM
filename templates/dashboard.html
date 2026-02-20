@@ -122,8 +122,8 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
 <div class="tab-panel active" id="panel-overview">
   <div class="grid" id="overviewCards">
     <div class="card"><div class="lbl">Meta Spend (7d)</div><div class="val b" id="ov-spend">—</div><div class="note" id="ov-spend-note"></div></div>
+    <div class="card"><div class="lbl">Total Revenue</div><div class="val g" id="ov-revenue">—</div><div class="note" id="ov-revenue-note">From attributed orders</div></div>
     <div class="card"><div class="lbl">Meta Clicks</div><div class="val g" id="ov-clicks">—</div><div class="note" id="ov-clicks-note"></div></div>
-    <div class="card"><div class="lbl">Avg CTR</div><div class="val g" id="ov-ctr">—</div><div class="note">Industry avg: 0.9%</div></div>
     <div class="card"><div class="lbl">Avg CPC</div><div class="val g" id="ov-cpc">—</div><div class="note" id="ov-cpc-note"></div></div>
   </div>
   <div class="grid">
@@ -147,10 +147,10 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
 <div class="tab-panel" id="panel-meta">
   <div class="grid" id="metaCards">
     <div class="card"><div class="lbl">Total Spend</div><div class="val b" id="m-spend">—</div></div>
+    <div class="card"><div class="lbl">Total Revenue</div><div class="val g" id="m-revenue">—</div><div class="note" id="m-revenue-note"></div></div>
+    <div class="card"><div class="lbl">ROAS</div><div class="val" id="m-roas">—</div><div class="note" id="m-roas-note"></div></div>
     <div class="card"><div class="lbl">Impressions</div><div class="val" id="m-impressions">—</div></div>
-    <div class="card"><div class="lbl">Reach</div><div class="val" id="m-reach">—</div></div>
     <div class="card"><div class="lbl">Clicks</div><div class="val g" id="m-clicks">—</div></div>
-    <div class="card"><div class="lbl">Avg CTR</div><div class="val g" id="m-ctr">—</div></div>
     <div class="card"><div class="lbl">Avg CPC</div><div class="val g" id="m-cpc">—</div></div>
   </div>
 
@@ -159,8 +159,8 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
     <button onclick="syncMeta()" style="background:var(--blue-bg);color:var(--blue);border:1px solid rgba(88,166,255,0.3);padding:6px 14px;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer">↻ Sync Now</button>
   </div>
   <table class="tbl" id="metaTable">
-    <thead><tr><th>Campaign</th><th>Status</th><th>Spend</th><th>Clicks</th><th>CTR</th><th>CPC</th><th>ROAS</th><th>Signal</th></tr></thead>
-    <tbody id="metaRows"><tr><td colspan="8" class="loading">Loading Meta data</td></tr></tbody>
+    <thead><tr><th>Campaign</th><th>Status</th><th>Spend</th><th>Revenue</th><th>Clicks</th><th>CTR</th><th>CPC</th><th>ROAS</th><th>Signal</th></tr></thead>
+    <tbody id="metaRows"><tr><td colspan="9" class="loading">Loading Meta data</td></tr></tbody>
   </table>
   <div class="ins" id="metaInsight" style="display:none"></div>
 
@@ -385,37 +385,53 @@ async function loadMeta() {
     const s = metaData.summary || {};
     const campaigns = metaData.campaigns || [];
 
+    // Calculate total revenue from campaigns
+    let totalRevenue = 0;
+    campaigns.forEach(c => { totalRevenue += (c.revenue || 0); });
+    const totalSpend = s.total_spend || 0;
+    const overallRoas = totalSpend > 0 ? totalRevenue / totalSpend : 0;
+
     // Overview cards
-    $('ov-spend').textContent = '$' + fmt(s.total_spend);
+    $('ov-spend').textContent = '$' + fmt(totalSpend);
     $('ov-spend-note').textContent = campaigns.length + ' campaigns';
+    $('ov-revenue').textContent = '$' + fmt(totalRevenue);
+    $('ov-revenue').className = 'val ' + (totalRevenue > 0 ? 'g' : 'dim');
+    $('ov-revenue-note').textContent = overallRoas > 0 ? fmt(overallRoas) + 'x ROAS' : 'From attributed orders';
     $('ov-clicks').textContent = fmtK(s.total_clicks);
     $('ov-clicks-note').textContent = '$' + fmt(s.avg_cpc) + ' per click';
-    $('ov-ctr').textContent = fmt(s.avg_ctr) + '%';
     $('ov-cpc').textContent = '$' + fmt(s.avg_cpc);
-    $('ov-cpc-note').textContent = s.avg_cpc < 0.15 ? '🔥 Below $0.15 target' : 'Above target';
+    $('ov-cpc-note').textContent = s.avg_cpc < 0.15 ? 'Below $0.15 target' : 'Above target';
 
     // Meta tab cards
-    $('m-spend').textContent = '$' + fmt(s.total_spend);
+    $('m-spend').textContent = '$' + fmt(totalSpend);
+    $('m-revenue').textContent = '$' + fmt(totalRevenue);
+    $('m-revenue').className = 'val ' + (totalRevenue > 0 ? 'g' : '');
+    $('m-revenue-note').textContent = totalRevenue > 0 ? (campaigns.filter(c=>c.revenue>0).length + ' attributed') : 'No revenue yet';
+    $('m-roas').textContent = overallRoas > 0 ? fmt(overallRoas) + 'x' : '—';
+    $('m-roas').className = 'val ' + (overallRoas >= 2 ? 'g' : overallRoas >= 1 ? 'a' : overallRoas > 0 ? 'r' : '');
+    $('m-roas-note').textContent = overallRoas >= 2 ? 'Profitable' : overallRoas > 0 ? 'Below 2x target' : '';
     $('m-impressions').textContent = fmtK(s.total_impressions);
-    $('m-reach').textContent = fmtK(s.total_reach);
     $('m-clicks').textContent = s.total_clicks || 0;
-    $('m-ctr').textContent = fmt(s.avg_ctr) + '%';
     $('m-cpc').textContent = '$' + fmt(s.avg_cpc);
 
-    // Campaign rows (with ROAS column)
+    // Campaign rows (with Revenue + ROAS columns)
     let html = '';
     campaigns.forEach(c => {
       const signal = c.cpc < 0.20 ? '<span class="g">★ Star performer</span>' :
                      c.cpc < 0.50 ? '<span class="a">● Acceptable</span>' :
                      '<span class="r">▼ Review / pause</span>';
       const statusColor = c.status === 'ACTIVE' ? 'g' : 'r';
-      const roas = (c.spend && c.spend > 0 && c.revenue) ? (c.revenue / c.spend) : 0;
-      const roasDisplay = roas > 0 ? fmt(roas) + 'x' : '<span style="color:var(--dim)">No revenue yet</span>';
+      const rev = c.revenue || 0;
+      const roas = (c.spend && c.spend > 0 && rev) ? (rev / c.spend) : 0;
+      const roasDisplay = roas > 0 ? fmt(roas) + 'x' : '<span style="color:var(--dim)">—</span>';
       const roasColor = roas >= 2 ? 'g' : roas >= 1 ? 'a' : roas > 0 ? 'r' : '';
+      const revDisplay = rev > 0 ? '$' + fmt(rev) : '<span style="color:var(--dim)">$0.00</span>';
+      const revColor = rev > 0 ? 'g' : '';
       html += `<tr>
-        <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.name}</td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.name}</td>
         <td class="mono ${statusColor}">${c.status}</td>
         <td class="mono">$${fmt(c.spend)}</td>
+        <td class="mono ${revColor}">${revDisplay}</td>
         <td class="mono">${c.clicks}</td>
         <td class="mono ${c.ctr > 3 ? 'g' : c.ctr > 1 ? 'a' : 'r'}">${fmt(c.ctr)}%</td>
         <td class="mono ${c.cpc < 0.20 ? 'g' : c.cpc < 0.50 ? 'a' : 'r'}">$${fmt(c.cpc)}</td>
@@ -423,7 +439,7 @@ async function loadMeta() {
         <td>${signal}</td>
       </tr>`;
     });
-    $('metaRows').innerHTML = html || '<tr><td colspan="8" style="color:var(--dim)">No campaigns found</td></tr>';
+    $('metaRows').innerHTML = html || '<tr><td colspan="9" style="color:var(--dim)">No campaigns found</td></tr>';
 
     // Meta insight
     const best = campaigns.reduce((a,b) => (a.ctr||0) > (b.ctr||0) ? a : b, {});
@@ -441,7 +457,7 @@ async function loadMeta() {
     $('prog-meta').textContent = '100% — Active & optimized';
 
   } catch(e) {
-    $('metaRows').innerHTML = '<tr><td colspan="7" style="color:var(--red)">Failed to load Meta data. Check API connection.</td></tr>';
+    $('metaRows').innerHTML = '<tr><td colspan="9" style="color:var(--red)">Failed to load Meta data. Check API connection.</td></tr>';
   }
 }
 

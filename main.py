@@ -1,5 +1,7 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v1.9.0 - Phase 9: Order webhook handler with UTM attribution, discount code
+         generation, customer data endpoint, dashboard revenue display
 v1.8.0 - Phase 8: Deploy restart fix, scheduler DB session, dashboard SEO tab,
          DB error recovery, activity log auto-refresh
 v1.7.0 - Phase 7: Shopify app TOML, Klaviyo DB fallback, JSON-LD structured

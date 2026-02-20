@@ -17,7 +17,7 @@ import hmac
 from datetime import datetime, timezone
 
 import requests
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -146,6 +146,15 @@ class UpdateProductMetafieldRequest(BaseModel):
     key: str
     value: str
     type: str = "single_line_text_field"
+
+
+class CreateDiscountRequest(BaseModel):
+    code: str  # e.g. "LASTCHANCE10"
+    discount_type: str = "percentage"  # "percentage" or "fixed_amount"
+    value: float = 10.0  # 10 = 10% off or $10 off
+    title: Optional[str] = None
+    usage_limit: Optional[int] = None  # None = unlimited
+    once_per_customer: bool = True
 
 
 # ─── Endpoints ────────────────────────────────────────────────────
@@ -378,6 +387,94 @@ def list_blog_posts():
     return {"status": "ok", "count": len(all_posts), "posts": all_posts}
 
 
+# ─── Discount Codes ───────────────────────────────────────────────
+
+@router.post("/create-discount", summary="Create a discount code")
+def create_discount(req: CreateDiscountRequest, db: Session = Depends(get_db)):
+    """Create a Shopify discount code via Price Rules API.
+
+    Creates a price rule then attaches a discount code to it.
+    Supports percentage (e.g. 10% off) and fixed_amount (e.g. $10 off).
+    """
+    # Shopify price rules expect negative value for discounts
+    value = -abs(req.value)
+
+    price_rule_payload = {
+        "price_rule": {
+            "title": req.title or req.code,
+            "target_type": "line_item",
+            "target_selection": "all",
+            "allocation_method": "across",
+            "value_type": req.discount_type,
+            "value": str(value),
+            "customer_selection": "all",
+            "once_per_customer": req.once_per_customer,
+            "starts_at": datetime.now(timezone.utc).isoformat(),
+        }
+    }
+    if req.usage_limit:
+        price_rule_payload["price_rule"]["usage_limit"] = req.usage_limit
+
+    # Step 1: Create the price rule
+    pr_data = _api("POST", "price_rules.json", json=price_rule_payload)
+    price_rule = pr_data.get("price_rule")
+    if not price_rule:
+        return {"status": "error", "message": "Failed to create price rule", "response": pr_data}
+
+    price_rule_id = price_rule["id"]
+
+    # Step 2: Create the discount code on the price rule
+    dc_data = _api("POST", f"price_rules/{price_rule_id}/discount_codes.json",
+                    json={"discount_code": {"code": req.code}})
+    discount_code = dc_data.get("discount_code")
+    if not discount_code:
+        return {"status": "error", "message": "Price rule created but discount code failed", "response": dc_data}
+
+    _log_activity(db, "SHOPIFY_DISCOUNT_CREATED", req.code,
+                  f"{req.discount_type} {abs(req.value)} | limit={req.usage_limit or 'unlimited'}")
+
+    return {
+        "status": "created",
+        "code": discount_code["code"],
+        "discount_type": req.discount_type,
+        "value": abs(req.value),
+        "price_rule_id": price_rule_id,
+        "usage_limit": req.usage_limit,
+        "once_per_customer": req.once_per_customer,
+    }
+
+
+# ─── Customers ────────────────────────────────────────────────────
+
+@router.get("/customers", summary="List recent customers")
+def list_customers(limit: int = 50):
+    """Fetch recent customers with order count and total spent.
+
+    Uses read_customers scope. Useful for Klaviyo list sync.
+    """
+    data = _api("GET", f"customers.json?limit={limit}&fields=id,first_name,last_name,email,orders_count,total_spent,created_at,tags")
+    customers = data.get("customers", [])
+
+    result = []
+    for c in customers:
+        result.append({
+            "id": c["id"],
+            "first_name": c.get("first_name", ""),
+            "last_name": c.get("last_name", ""),
+            "email": c.get("email", ""),
+            "orders_count": c.get("orders_count", 0),
+            "total_spent": c.get("total_spent", "0.00"),
+            "created_at": c.get("created_at", ""),
+            "tags": c.get("tags", ""),
+        })
+
+    return {
+        "status": "ok",
+        "count": len(result),
+        "customers": result,
+    }
+
+
 # ─── Webhooks ────────────────────────────────────────────────────
 
 @router.post("/register-webhook", summary="Manually register order webhook")
@@ -418,15 +515,53 @@ def list_registered_webhooks():
 
 @router.post("/webhook/order-created", summary="Order created webhook",
              description="Receive Shopify order webhook, attribute revenue to campaigns via UTM/referrer")
-def webhook_order_created(payload: dict, db: Session = Depends(get_db)):
-    """
-    When an order comes in, delegate to AttributionService to parse UTMs
-    and attribute revenue to the correct campaign.
-    """
-    from app.services.attribution import AttributionService
+async def webhook_order_created(request: Request, db: Session = Depends(get_db)):
+    """Receive Shopify order webhook.
 
-    order = payload.get("order", payload)  # Handle both wrapped and raw payloads
+    Shopify sends the order as a raw JSON body (not wrapped in {"order": ...}).
+    Parses order_number, total_price, line_items, customer, discount_codes,
+    landing_site, referring_site, then delegates to AttributionService for
+    campaign revenue attribution.
+    """
+    try:
+        import json as _json
+        body = await request.body()
+        order = _json.loads(body) if body else {}
+    except Exception:
+        order = {}
+
+    # Shopify may wrap or send raw — normalise
+    if "order" in order and isinstance(order["order"], dict):
+        order = order["order"]
+
+    order_number = order.get("order_number") or order.get("name") or order.get("id", "unknown")
+    total_price = float(order.get("total_price", 0) or 0)
+    customer = order.get("customer", {}) or {}
+    customer_email = customer.get("email", "")
+    discount_codes = order.get("discount_codes", []) or []
+    line_items = order.get("line_items", []) or []
+    source_name = order.get("source_name", "")
+    landing_site = order.get("landing_site", "")
+    referring_site = order.get("referring_site", "")
+
+    # Log ORDER_RECEIVED immediately (before attribution)
+    _log_activity(
+        db, "ORDER_RECEIVED", str(order_number),
+        f"${total_price:.2f} | {len(line_items)} items | "
+        f"customer={customer_email} | source={source_name} | "
+        f"discounts={','.join(d.get('code','') for d in discount_codes) or 'none'} | "
+        f"landing={landing_site[:80]}"
+    )
+
+    # Attribute revenue to a campaign
+    from app.services.attribution import AttributionService
     attribution_svc = AttributionService(db)
     result = attribution_svc.attribute_order(order)
 
-    return {"status": "ok", "attribution": result}
+    return {
+        "status": "ok",
+        "order_number": order_number,
+        "total_price": total_price,
+        "items": len(line_items),
+        "attribution": result,
+    }
