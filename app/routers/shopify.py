@@ -235,11 +235,16 @@ def list_products(limit: int = 50, status: str = "active"):
 @router.get("/products/{product_id}", summary="Get single product")
 def get_product(product_id: int):
     """Get full product details."""
-    data = _api("GET", f"products/{product_id}.json")
-    product = data.get("product")
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    return {"status": "ok", "product": product}
+    try:
+        data = _api("GET", f"products/{product_id}.json")
+        product = data.get("product")
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        return {"status": "ok", "product": product}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Product {product_id} not found")
 
 
 @router.put("/products/{product_id}", summary="Update a product")
@@ -306,14 +311,17 @@ def list_collections():
 @router.get("/collections/{collection_id}/products", summary="Products in a collection")
 def collection_products(collection_id: int):
     """Get products belonging to a specific collection."""
-    data = _api("GET", f"collections/{collection_id}/products.json?fields=id,title,handle,status,tags")
-    products = data.get("products", [])
-    return {
-        "status": "ok",
-        "collection_id": collection_id,
-        "count": len(products),
-        "products": products,
-    }
+    try:
+        data = _api("GET", f"collections/{collection_id}/products.json?fields=id,title,handle,status,tags")
+        products = data.get("products", [])
+        return {
+            "status": "ok",
+            "collection_id": collection_id,
+            "count": len(products),
+            "products": products,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found")
 
 
 @router.get("/health-check", summary="Full store health audit")
