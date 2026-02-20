@@ -9,9 +9,9 @@ AutoSEM is an autonomous advertising platform built with FastAPI. It manages mul
 **Store:** https://court-sportswear.com
 **Repo:** https://github.com/Dennisdeuce/AutoSEM (branch: main)
 
-## Current Version: 2.3.0
+## Current Version: 2.4.0
 
-13 routers, 90+ endpoints. Production smoke-tested: 51/54 pass. AI ad copy generation via Claude API (POST /campaigns/generate). Scheduler: midnight CST daily optimization (cron), hourly spend checks, heartbeat ticks. Automation router fixed (missing Query import). Shopify error handling hardened. Meta ad creative CRUD API. NotificationService wired into optimizer. Klaviyo auto-init with fallback key.
+13 routers, 90+ endpoints. Production smoke-tested: 51/54 pass. AI ad copy generation via Claude API (POST /campaigns/generate). Scheduler: midnight CST daily optimization (cron), hourly spend checks, heartbeat ticks. Optimizer awareness-mode fix (won't auto-pause pre-revenue campaigns). Ad-level CRUD fully deployed.
 
 ## Commands
 
@@ -40,7 +40,7 @@ No test framework configured. Use Swagger UI or curl for testing.
 | Router | Prefix | Purpose |
 |--------|--------|---------|
 | `dashboard` | `/dashboard` | Aggregated metrics, sync-meta, optimize-now, activity log, emergency controls |
-| `meta` | `/meta` | OAuth, campaigns, activate/pause/set-budget (CBO), ad creative CRUD, full-structure query |
+| `meta` | `/meta` | OAuth, campaigns, activate/pause/set-budget (CBO), ad creative CRUD, full-structure query, ad-level update/pause |
 | `tiktok` | `/tiktok` | TikTok OAuth, campaign launch, video generation, targeting |
 | `campaigns` | `/campaigns` | CRUD, /active, DELETE /cleanup, POST /generate (AI ad copy via Claude API) |
 | `products` | `/products` | Shopify product sync and management |
@@ -57,147 +57,119 @@ No test framework configured. Use Swagger UI or curl for testing.
 Tables: products, campaigns, meta_tokens, tiktok_tokens, activity_logs, settings
 
 **Scheduler** (`scheduler.py`): APScheduler runs 6 jobs:
-- Daily optimization at midnight CST (06:00 UTC cron trigger) — Phase 11
+- Daily optimization at midnight CST (06:00 UTC cron trigger)
 - Optimization every 6 hours (interval, intra-day)
 - Performance sync every 2 hours
-- Hourly spend check (compares active budgets vs daily_spend_limit, alerts at 90%) — Phase 11
-- Scheduler heartbeat tick every hour (proof-of-life logging) — Phase 11
+- Hourly spend check (compares active budgets vs daily_spend_limit, alerts at 90%)
+- Scheduler heartbeat tick every hour (proof-of-life logging)
 - Shopify token refresh every 20 hours
 
-## Key Files
-
-- `main.py` — FastAPI app factory, router registration, version
-- `app/version.py` — Single source of truth for VERSION
-- `app/routers/` — All 13 API router modules
-- `app/routers/meta.py` — CBO budget, ad creative CRUD, adset/ad query, full-structure (Phase 10B)
-- `app/routers/deploy.py` — Deploy with os._exit(0) restart (Phase 8 fix)
-- `app/routers/seo.py` — JSON-LD and sitemap endpoints (Phase 7)
-- `app/routers/health.py` — Deep health + GET /reset-db (Phase 8)
-- `app/routers/shopify.py` — Webhooks, customers, discounts, order webhook handler (Phase 9)
-- `app/services/meta_ads.py` — Meta API with appsecret_proof, adset discovery
-- `app/services/optimizer.py` — Auto-actions with NotificationService, budget scaling, pausing, CPC rules (Phase 10 fix)
-- `app/services/notifications.py` — NotificationService: order, auto-action, spend alert logging (Phase 10C)
-- `app/services/campaign_generator.py` — Campaign generation from products, key/value settings load (Phase 10A fix)
-- `app/services/performance_sync.py` — Meta insights sync, writes all metrics + daily_budget to CampaignModel (Phase 10 fix)
-- `app/services/klaviyo_service.py` — Abandoned cart flow, DB key fallback (Phase 7)
-- `app/services/shopify_token.py` — Centralized token manager with DB persistence
-- `app/services/shopify_webhook_register.py` — Webhook registration with logging
-- `app/services/attribution.py` — UTM-based revenue attribution from Shopify webhooks
-- `app/services/jsonld_generator.py` — Product schema.org JSON-LD generator (Phase 7)
-- `app/services/sitemap.py` — XML sitemap generator (Phase 7)
-- `app/database.py` — SQLAlchemy models, session management, PendingRollbackError recovery (Phase 8)
-- `app/schemas.py` — Pydantic request/response models
-- `scheduler.py` — 6 background jobs: midnight CST optimization, 6h interval, 2h perf sync, hourly spend check, hourly tick, 20h Shopify token (Phase 11)
-- `SMOKE_TEST_RESULTS.md` — Production endpoint smoke test audit (Phase 11)
-- `templates/dashboard.html` — Dashboard UI with 7 tabs (Phase 9: revenue display, ROAS cards)
-- `shopify.app.toml` — Shopify app config with all required scopes
-
-## Active Meta Campaigns
+## Active Meta Campaigns (Updated Feb 20, 2026)
 
 | DB ID | Platform ID | Name | Budget | Status | Performance |
 |-------|------------|------|--------|--------|-------------|
-| 114 | 120206746647300364 | Ongoing website promotion | **$20/day** | ACTIVE | $0.11 CPC, 4.75% CTR ⭐ |
-| 115 | 120241759616260364 | Court Sportswear - Sales | **$5/day** | ACTIVE | $0.69 CPC, 2.76% CTR |
+| 114 | 120206746647300364 | Ongoing website promotion | **$20/day** | **ACTIVE** | $0.11 CPC, 4.83% CTR ⭐ |
+| 115 | 120241759616260364 | Court Sportswear - Sales | $5/day | **PAUSED** | $0.73 CPC — stopped |
 
-**Budget shift executed Feb 20:** Moved $5/day from Sales → Ongoing. At Ongoing's $0.11 CPC, the shift = ~45 extra quality clicks/day.
+### Ad-Level Status (Ongoing Campaign)
+| Ad ID | Creative | Destination URL | Status |
+|-------|----------|-----------------|--------|
+| 120206746647430364 | Tennis TShirts image 1 | `/collections/all-mens-t-shirts` | ✅ ACTIVE |
+| 120206746647460364 | Tennis TShirts image 2 | `/collections/all-mens-t-shirts` | ✅ ACTIVE |
+| 120206746647450364 | Dynamic catalog ad | Dynamic | ✅ ACTIVE |
+| 120206746647410364 | Tennis TShirts (old) | `http://www.court-sportswear.com/` | ⏸️ PAUSED |
+| 120206746647440364 | Tennis TShirts (old) | `http://www.court-sportswear.com/` | ⏸️ PAUSED |
 
-**⚠️ Both campaigns use Campaign Budget Optimization (CBO)** — budget is set at campaign level, not adset level. The `/meta/set-budget` endpoint handles this (tries campaign first, falls back to adset).
+**Key change Feb 20:** Paused 2 ads still pointing to homepage. All active ads now deep-link to collection page. This was only possible via ad-level API endpoints (GET /meta/campaigns/{id}/full-structure, PUT /meta/ads/{id}/update).
 
-**Ad destination URLs:** Ongoing campaign name includes "http://www.court-sportswear.com/" indicating ads point to **homepage**. Should be changed to `/collections/all-mens-t-shirts` for better conversion. Use GET /meta/campaigns/{id}/full-structure to inspect current ad creatives, then POST /meta/create-ad to create new ads with correct destination URLs.
+### TikTok — ALL DISABLED
+All 19 TikTok campaigns DISABLED. Total spend: $11.11. Audience targeting catastrophically broken (81% gamers, 0% tennis players, 71% non-US traffic despite US-only setting). Do not reactivate.
 
-## Optimizer Auto-Actions (Phase 4)
+## Optimizer Engine
 
-The optimizer runs every 6h and executes real Meta API actions:
-- **CPC > $0.50** (landing page flag): Auto-reduce adset budget by 25%
-- **CPC > $1.00**: Auto-pause campaign
-- **CTR > 3% AND CPC < $0.20**: Auto-increase budget by 20% (capped at $25/day)
-- **ROAS < 0.5 after $20+ spend**: Auto-pause campaign
-- All actions logged as `AUTO_OPTIMIZE` to ActivityLogModel
+### Awareness Mode (Current Setting)
+`min_roas_threshold` is set to `0.0` via settings API. This means:
+- **ROAS-based auto-pause is DISABLED** — campaigns won't be paused for zero revenue
+- **ROAS-based budget adjustments are DISABLED** — no budget cuts for low ROAS
+- **All other rules still active:** CPC limits, landing page flags, scale-winner, emergency pause
+- **To re-enable:** `PUT /api/v1/settings/ {"min_roas_threshold": 1.5}`
 
-### ✅ Optimizer Data Pipeline — FIXED in v2.0.0 (Phase 10)
+### Auto-Action Rules
+| Rule | Condition | Action | Respects awareness mode? |
+|------|-----------|--------|--------------------------|
+| pause_underperformer | ROAS < threshold/3 after $20+ spend | Pause campaign | ✅ Yes — skipped when threshold=0 |
+| flag_landing_page_pause | CTR>3%, conv<1%, CPC>$1.00 | Pause campaign | No — always active |
+| flag_landing_page_budget_cut | CTR>3%, conv<1%, CPC>$0.50 | Cut budget 25% | No — always active |
+| scale_winner | CTR>3%, CPC<$0.20, 10+ clicks | Increase budget 20% (cap $25) | No — always active |
+| budget_increase | ROAS > 1.5x threshold | Increase budget 25% | ✅ Yes — skipped when threshold=0 |
+| budget_decrease | ROAS < threshold, $50+ spend | Decrease budget 25% | ✅ Yes — skipped when threshold=0 |
+| emergency_pause | Net loss > $500 | Pause ALL campaigns | No — always active |
 
-**Status: Fully operational.** All fixes applied:
-1. ✅ PerformanceSyncService writes spend/clicks/impressions/revenue/daily_budget to CampaignModel
-2. ✅ Optimizer `_execute_meta_budget_change()` uses CBO-first (campaign-level), adset fallback
-3. ✅ Optimizer `_load_settings()` reads key/value SettingsModel correctly (was accessing non-existent columns)
-4. ✅ POST /dashboard/optimize-now — manual trigger endpoint
-5. ✅ DELETE /campaigns/cleanup — phantom campaign purge (protects known active campaigns)
-6. ✅ Klaviyo auto-init: env key written to DB on first /klaviyo/* request
-7. ✅ daily_budget synced from Meta API (cents→dollars) during performance sync
+### ⚠️ BUG-10 FIX (Feb 20): Optimizer used hardcoded ROAS < 0.5 check
+The optimizer had a hardcoded `roas < 0.5` pause rule that ignored the `min_roas_threshold` setting. This caused it to auto-pause the Ongoing campaign (which had 0 ROAS because no sales yet, despite excellent $0.11 CPC). Fixed to respect settings — when threshold is 0, ROAS-based pauses are completely skipped.
 
-**Revenue confirmed:** $82.98 from 2 orders, 2.05x ROAS (verified via /health/deep)
+## Court Sportswear CRO Status (Feb 20, 2026)
 
-## Integrations
+### ✅ Completed
+- Free shipping announcement bar (links to /collections/all-mens-t-shirts)
+- Judge.me reviews installed on all product pages
+- Meta ad destination URLs changed to collection page (deep-link)
+- 2 old homepage-pointing ads paused
+- 23/23 product tags optimized with CRO keywords
+- Shopify orders/create webhook registered
+- Meta Pixel, TikTok Pixel, GA4, GTM all active
+- Cookie consent with Google Consent Mode v2
 
-### Shopify (Court Sportswear: `4448da-3.myshopify.com`)
-- Token: Auto-refreshed via client_credentials every 20h, persisted in SettingsModel
-- **✅ All scopes active** (Phase 9): read_all_orders, write_orders, read_checkouts, read_customers, write_discounts, write_price_rules + existing scopes
-- App version "klaviyo2" installed Feb 20, 2026 — token prefix: `shpat_bd9b65...`
-- **Webhook registered:** orders/create → `auto-sem.replit.app/api/v1/shopify/webhook/order-created` (ID: 1576353759455)
-- **Discount code WELCOME10 created:** price_rule_id 1468723921119, 10% off, once per customer
-- Env vars: `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_STORE`
+### ✅ Klaviyo
+- Abandoned cart flow: **LIVE** (flow VFSVJd, 1 email live, 1 draft)
+- 2 profiles collected (dennisdeuce@gmail.com, julierpenn3@gmail.com)
+- 44 Shopify customers total, 29 with orders, $2,229.50 lifetime revenue
 
-### Meta Ads (ad account: `act_1358540228396119`, app: `909757658089305`)
-- Token stored in DB meta_tokens table, 45 days remaining (as of Feb 20)
-- All API calls require `appsecret_proof` (HMAC-SHA256)
-- CBO budget updates working at campaign level
-- **Ad creative CRUD (Phase 10B):** query adsets/ads, create ads with image+copy, update/delete ads
-- **Full structure query:** GET /meta/campaigns/{id}/full-structure returns campaign→adsets→ads tree
-- Env vars: `META_ACCESS_TOKEN`, `META_APP_SECRET`, `META_AD_ACCOUNT_ID`, `META_PAGE_ID`
-- `graph.facebook.com` is blocked in Claude's bash — proxy through AutoSEM endpoints
+### ❌ Still Missing
+- **Email capture popup on store** — no Klaviyo form/popup installed on court-sportswear.com
+- **Abandoned cart email #2** — still in draft status in Klaviyo
+- **Google Ads** — router exists but no credentials configured
 
-### TikTok Ads
-- All campaigns PAUSED (audience targeting broken — 81% gamers, 0% tennis players)
-- Do not reactivate until campaigns rebuilt with proper interest targeting
-- Env vars: `TIKTOK_ACCESS_TOKEN`, `TIKTOK_ADVERTISER_ID`
+## Key API Endpoints for Common Tasks
 
-### Klaviyo
-- API key: `pk_8331b081008957a6922794034954df1d69`
-- ✅ **Auto-init (Phase 10C):** On any /klaviyo/* request, key is auto-written to DB from env or hardcoded fallback
-- DB fallback via POST /klaviyo/set-key also available for manual override
-- 3-email abandoned cart flow ready to deploy once key loads
-- **No Klaviyo email capture popup on store** — this is a major gap
+```bash
+# Check everything is running
+curl https://auto-sem.replit.app/health
 
-### Google Ads
-- Router exists but returns `not_configured` (no credentials set)
-- Future integration planned
+# Sync latest Meta performance data
+curl -X POST https://auto-sem.replit.app/api/v1/automation/sync-performance
 
-## Court Sportswear Store Audit (Feb 20, 2026)
+# Run optimization (respects awareness mode)
+curl -X POST https://auto-sem.replit.app/api/v1/automation/optimize
 
-### CRO Elements Status
-- ✅ Free shipping bar in announcement bar + meta description
-- ✅ Judge.me reviews installed (extensive config, popup widget, review flow)
-- ✅ Meta Pixel active (ID 748250046767709)
-- ✅ TikTok Pixel active (CL7OL1BC77U6400CDM60)
-- ✅ Google Analytics active (G-ESZRWQZJM5, GTM: GT-MQJ4CVNJ)
-- ✅ Google Tag Manager installed
-- ✅ Shop Now CTAs present (3 instances)
-- ✅ Slideshow/Hero section present
-- ✅ Cookie consent (Pandectes GDPR) with Google Consent Mode v2
-- ✅ Snapchat Pixel present
-- ❌ **Klaviyo email capture: NOT INSTALLED** — no popup, no email collection
-- ❌ **Abandoned cart flow: NOT ACTIVE** — Klaviyo key not loaded
+# Get full campaign structure (campaign → adsets → ads)
+curl https://auto-sem.replit.app/api/v1/meta/campaigns/120206746647300364/full-structure
 
-### Performance Concerns
-- Homepage: 975KB HTML, 0.697s TTFB, **81 script tags**, 219 images
-- Collection page: 1.37MB HTML, 1.03s TTFB
-- 89% mobile traffic with 57% bounce rate (under 10s)
-- Heavy page weight is likely contributing to bounce rate on mobile
-- Theme: Shopify "Savor"
+# Pause/activate a specific ad
+curl -X PUT https://auto-sem.replit.app/api/v1/meta/ads/{ad_id}/update \
+  -H "Content-Type: application/json" -d '{"status": "PAUSED"}'
 
-### Conversion Funnel Issues
-- 67% of traffic lands on homepage (ads point to homepage, not collections)
-- Meta ads should deep-link to `/collections/all-mens-t-shirts`
-- Zero purchases from 298 landing page views in Feb 1-12 period
-- Only 17% of visitors stay longer than 1 minute
+# Check automation settings
+curl https://auto-sem.replit.app/api/v1/settings/
+
+# Update settings (e.g., re-enable ROAS optimization after first sale)
+curl -X PUT https://auto-sem.replit.app/api/v1/settings/ \
+  -H "Content-Type: application/json" -d '{"min_roas_threshold": 1.5}'
+
+# Get Shopify products
+curl https://auto-sem.replit.app/api/v1/shopify/products
+
+# Update product tags
+curl -X PUT https://auto-sem.replit.app/api/v1/shopify/products/{product_id} \
+  -H "Content-Type: application/json" -d '{"tags": "new,tags,here"}'
+
+# Check Klaviyo status
+curl https://auto-sem.replit.app/api/v1/klaviyo/flows/VFSVJd
+```
 
 ## Deploy Flow
 
-### ✅ Workspace Git Checkout (Phase 9 fix)
-
-The Replit workspace is now a direct git checkout. This means `git fetch + reset` in the Replit Shell updates the actual running code.
-
-**Correct deploy sequence (v1.9.0+):**
+### Workspace Git Checkout (Replit)
 ```bash
 # In Replit Shell:
 git fetch origin main
@@ -206,109 +178,55 @@ cat app/version.py  # verify version
 # Then click "Republish" in Replit Deployments UI
 ```
 
-**Why this works now:** Previously, Replit's supervisor restarted from workspace files while deploy/pull wrote to a separate git checkout. Phase 9 fixed this by making the workspace itself the git checkout via:
+### Via API:
 ```bash
-git remote set-url origin https://github.com/Dennisdeuce/AutoSEM.git
-git fetch origin main
-git reset --hard origin/main
+curl -X POST https://auto-sem.replit.app/api/v1/deploy/pull \
+  -H "X-Deploy-Key: autosem-deploy-2026"
 ```
 
-**The deploy/pull API endpoint still works** but workspace-based deploy is more reliable.
+**Important:** After Republish, the .git directory may be wiped. Re-run `git fetch + reset` if needed before next deploy.
 
-### Previous issues (resolved):
-- `os.execv()` doesn't work in Replit
-- Republish wipes .git directory (no longer matters since workspace IS the checkout)
-- deploy/pull wrote to wrong location (now workspace and deploy target are the same)
+## Environment Variables (Replit Secrets)
 
-## Project Completion Assessment (~75%)
+`DATABASE_URL`, `META_ACCESS_TOKEN`, `META_APP_SECRET`, `META_AD_ACCOUNT_ID`,
+`META_PAGE_ID`, `TIKTOK_ACCESS_TOKEN`, `TIKTOK_ADVERTISER_ID`, `SHOPIFY_CLIENT_ID`,
+`SHOPIFY_CLIENT_SECRET`, `SHOPIFY_STORE`, `DEPLOY_KEY`, `KLAVIYO_API_KEY`,
+`GITHUB_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY`
 
-| Component | Status | % |
-|-----------|--------|---|
-| Platform infrastructure | FastAPI, DB, scheduler (6 jobs), deploy, smoke-tested | 95% |
-| Meta Ads integration | OAuth, campaigns, sync, budget, CBO, ad creative CRUD, full-structure | 90% |
-| Shopify integration | Token, products, webhooks, discounts, customers | 80% |
-| Dashboard | 7 tabs, Meta metrics, SEO, system health, optimize-now | 80% |
-| Order tracking/attribution | Webhook registered, handler built, UTM parsing | 70% |
-| Optimizer engine | Settings fixed, CBO budget changes, manual trigger, data pipeline working | 85% |
-| Performance sync → DB | Writes all metrics + daily_budget to CampaignModel | 85% |
-| Klaviyo/email | Router exists, auto-init with fallback key, DB fallback | 40% |
-| TikTok integration | OAuth + read-only, no optimization | 25% |
-| Google Ads integration | Router exists, no credentials | 15% |
-| AI ad copy generation | POST /campaigns/generate via Claude Haiku, stores in DB | 60% |
-| Notifications/alerts | NotificationService wired into optimizer, logs auto-actions | 40% |
+## Critical Rules
+
+1. **Never modify AutoSEM code without verifying it won't break court-sportswear.com** — both systems are interconnected via webhooks, pixels, and API calls
+2. **Meta API calls must go through AutoSEM** — `graph.facebook.com` is blocked in Claude's bash environment
+3. **Meta budgets are in cents** — $20/day = 2000 in the API
+4. **CBO campaigns** — budget set at campaign level, not adset level
+5. **After first sale:** Set min_roas_threshold back to 1.5 via settings API
+6. **Shopify API for products:** Use Shopify-first approach (not Printful API) due to integration limitations
 
 ## Known Bugs
 
-### BUG-1: Scheduler optimizer missing DB session — FIXED in v1.8.0
-
-### BUG-2: Klaviyo env var not loading — FIXED in v2.0.0
-✅ Auto-init: on any /klaviyo/* request, if key is missing from DB but present in env, it's auto-written to DB. Manual fallback via POST /klaviyo/set-key still available.
-
-### BUG-3: Shopify scopes insufficient — FIXED in v1.9.0
-✅ App reinstalled with all required scopes. Token refreshed. Webhook registered.
-
-### BUG-4: Deploy auto-restart — FIXED in v1.8.0 + v1.9.0 workspace fix
-
-### BUG-5: Optimizer data pipeline — FIXED in v2.0.0
-✅ PerformanceSyncService now writes all metrics (spend, clicks, impressions, revenue, daily_budget) to CampaignModel. Optimizer settings load fixed to use key/value SettingsModel correctly.
-
-### BUG-6: Optimizer CBO budget changes — FIXED in v1.10.0
-✅ Optimizer `_execute_meta_budget_change()` tries campaign-level CBO first, falls back to adset-level.
-
-### BUG-7: Automation router fails to load — FIXED in v2.3.0
-`app/routers/automation.py` used `Query` from fastapi on line 216 but never imported it. Router silently failed to load (12/13 routers). Fixed by adding `Query` to the import.
-
-### BUG-8: Shopify /products/{id} returns 500 for invalid IDs — FIXED in v2.3.0
-Shopify API 404 errors propagated as unhandled 500s. Wrapped in try/except with proper HTTPException(404).
-
-### BUG-9: Shopify /collections/{id}/products returns 500 for invalid IDs — FIXED in v2.3.0
-Same fix as BUG-8.
-
-## Dashboard Tabs
-
-1. **Overview** — KPIs, optimization progress bars, product/collection counts
-2. **Meta Ads** — Campaign table with spend/clicks/CTR/CPC/ROAS, revenue column, budget controls, sync button
-3. **Klaviyo** — Email marketing status (pending key configuration)
-4. **Shopify** — Store connection, products, token TTL
-5. **SEO & Content** — Sitemap link, JSON-LD generation, per-product status
-6. **System Health** — Service status, activity log (auto-refresh 30s), scheduler, financials
-7. **Task Tracker** — Optimization tasks and progress
-
-## Environment Variables
-
-See Replit Secrets. Key vars:
-`DATABASE_URL`, `META_ACCESS_TOKEN`, `META_APP_SECRET`, `META_AD_ACCOUNT_ID`,
-`META_PAGE_ID` (required for ad creative creation),
-`TIKTOK_ACCESS_TOKEN`, `TIKTOK_ADVERTISER_ID`, `SHOPIFY_CLIENT_ID`,
-`SHOPIFY_CLIENT_SECRET`, `SHOPIFY_STORE`, `DEPLOY_KEY`, `KLAVIYO_API_KEY`,
-`GITHUB_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY` (required for AI ad copy generation)
-
-## Key Conventions
-
-- All routers prefixed `/api/v1/<name>`
-- Platform tokens stored in DB (meta_tokens, tiktok_tokens tables)
-- Shopify token in SettingsModel (auto-refreshed)
-- Graceful error handling — endpoints return `{"success": false, "error": "..."}` on failure
-- Activity logging via ActivityLogModel for all automated actions
-- Meta budget parameters are in **cents** (e.g., 1500 = $15/day)
-- CBO campaigns: set budget at campaign level, not adset level
-- DB error recovery: GET /api/v1/health/reset-db clears PendingRollbackError state
-- Deploy via workspace git checkout + Republish
+| Bug | Status | Fix |
+|-----|--------|-----|
+| BUG-1: Scheduler optimizer missing DB session | ✅ Fixed v1.8.0 | |
+| BUG-2: Klaviyo env var not loading | ✅ Fixed v2.0.0 | Auto-init from env |
+| BUG-3: Shopify scopes insufficient | ✅ Fixed v1.9.0 | App reinstalled |
+| BUG-4: Deploy auto-restart | ✅ Fixed v1.8.0 | os._exit(0) |
+| BUG-5: Optimizer data pipeline | ✅ Fixed v2.0.0 | PerformanceSyncService |
+| BUG-6: Optimizer CBO budget | ✅ Fixed v1.10.0 | Campaign-first, adset fallback |
+| BUG-7: Automation router missing Query import | ✅ Fixed v2.3.0 | Added import |
+| BUG-8: Shopify 500 on invalid product ID | ✅ Fixed v2.3.0 | Try/except |
+| BUG-9: Shopify 500 on invalid collection ID | ✅ Fixed v2.3.0 | Try/except |
+| BUG-10: Optimizer ignores min_roas_threshold=0 | ✅ Fixed v2.4.0 | Awareness mode |
 
 ## Phase History
 
-- **Phase 1:** Bug fixes, campaign activation, phantom cleanup
-- **Phase 2:** Klaviyo service, attribution, health endpoint, dashboard upgrades
-- **Phase 3:** Shopify webhooks, schema fixes, Google Ads hardening, scheduler heartbeat (v1.4.0)
-- **Phase 4:** Webhook fix, token refresh, optimizer auto-actions, adset discovery (v1.5.0)
-- **Phase 5:** Deploy webhook, campaign schema fix, dashboard polish, activity log (v1.6.0)
-- **Phase 6:** Auto-restart attempt (os.execv — doesn't work in Replit)
-- **Phase 7:** Shopify TOML, Klaviyo DB fallback, JSON-LD, sitemap (v1.7.0)
-- **Phase 8:** Deploy restart fix (os._exit), scheduler DB session, dashboard SEO/activity-log/version, DB error recovery (v1.8.0)
-- **Phase 9:** Order webhook handler, discount codes (WELCOME10), customer endpoint, revenue dashboard, CBO budget fix, workspace git checkout, Shopify scopes activated (v1.9.0)
-- **Phase 10A:** Optimizer + campaign_generator settings load fix (key/value store), phantom campaign purge (DELETE /cleanup), manual optimize trigger (POST /optimize-now), Klaviyo auto-init env→DB, daily_budget sync from Meta (cents→dollars) (v2.0.0)
-- **Phase 10B:** Meta ad creative CRUD API — adset/ad query, full-structure, create-ad, update/delete ads (v2.1.0)
-- **Phase 10C:** Klaviyo hardcoded fallback key, NotificationService wired into optimizer, version bump to v2.2.0
-- **Phase 11A:** Production smoke test — 51/54 endpoints pass. Fixed BUG-7 (automation router missing Query import), BUG-8/9 (Shopify 500s on invalid IDs). Created SMOKE_TEST_RESULTS.md.
-- **Phase 11B:** Scheduler upgrade — midnight CST daily optimization (CronTrigger), hourly spend check with 90% utilization alerts, hourly heartbeat tick. 6 total jobs.
-- **Phase 11C:** AI ad copy pipeline — POST /campaigns/generate calls Claude Haiku 4.5 to generate 3 ad variants per product. Stores as draft campaign in DB. (v2.3.0)
+- **Phase 1-3:** Core infrastructure, bug fixes, dashboard, scheduler
+- **Phase 4:** Optimizer auto-actions with CPC thresholds, budget scaling
+- **Phase 5-6:** Deploy system, campaign schema
+- **Phase 7:** Shopify TOML, Klaviyo, JSON-LD, sitemap
+- **Phase 8:** Deploy restart, DB error recovery, dashboard polish
+- **Phase 9:** Order webhooks, discounts, revenue dashboard, workspace git checkout
+- **Phase 10A:** Optimizer settings fix, performance sync pipeline, Klaviyo auto-init
+- **Phase 10B:** Meta ad creative CRUD (adset/ad query, full-structure, create/update/delete)
+- **Phase 10C:** NotificationService, Klaviyo fallback key
+- **Phase 11:** Production smoke test (51/54), scheduler upgrade (6 jobs), AI ad copy generation
+- **Phase 12 (Feb 20):** Ad-level optimization — paused homepage-pointing ads, deep-linked active ads to collection page. Optimizer awareness-mode fix. Sales campaign paused ($0.73 CPC waste stopped). 23/23 product tags optimized. (v2.4.0)
