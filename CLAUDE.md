@@ -9,9 +9,9 @@ AutoSEM is an autonomous advertising platform built with FastAPI. It manages mul
 **Store:** https://court-sportswear.com
 **Repo:** https://github.com/Dennisdeuce/AutoSEM (branch: main)
 
-## Current Version: 2.2.0
+## Current Version: 2.3.0
 
-13 routers, 85+ endpoints. Meta ad creative CRUD API (query adsets/ads, create/update/delete ads). NotificationService wired into optimizer for auto-action alerts. Klaviyo auto-init with hardcoded fallback key. Revenue confirmed: $82.98 from 2 orders, 2.05x ROAS (verified via /health/deep). Meta campaigns: Ongoing (120206746647300364) $20/day, Sales (120241759616260364) $5/day. Klaviyo key: pk_8331b081008957a6922794034954df1d69.
+13 routers, 90+ endpoints. Production smoke-tested: 51/54 pass. AI ad copy generation via Claude API (POST /campaigns/generate). Scheduler: midnight CST daily optimization (cron), hourly spend checks, heartbeat ticks. Automation router fixed (missing Query import). Shopify error handling hardened. Meta ad creative CRUD API. NotificationService wired into optimizer. Klaviyo auto-init with fallback key.
 
 ## Commands
 
@@ -42,7 +42,7 @@ No test framework configured. Use Swagger UI or curl for testing.
 | `dashboard` | `/dashboard` | Aggregated metrics, sync-meta, optimize-now, activity log, emergency controls |
 | `meta` | `/meta` | OAuth, campaigns, activate/pause/set-budget (CBO), ad creative CRUD, full-structure query |
 | `tiktok` | `/tiktok` | TikTok OAuth, campaign launch, video generation, targeting |
-| `campaigns` | `/campaigns` | CRUD for campaign records, /active, DELETE /cleanup phantom purge |
+| `campaigns` | `/campaigns` | CRUD, /active, DELETE /cleanup, POST /generate (AI ad copy via Claude API) |
 | `products` | `/products` | Shopify product sync and management |
 | `settings` | `/settings` | Spend limits, ROAS thresholds, emergency pause config |
 | `deploy` | `/deploy` | GitHub webhook + deploy/pull with auto-restart |
@@ -51,14 +51,17 @@ No test framework configured. Use Swagger UI or curl for testing.
 | `klaviyo` | `/klaviyo` | Klaviyo flows, abandoned cart, email marketing, POST /set-key, auto-init from env |
 | `health` | `/health` | Deep health check, GET /reset-db for error recovery |
 | `seo` | `/seo` | JSON-LD structured data, XML sitemap generation |
-| `automation` | - | Activity log endpoint (merged into dashboard router) |
+| `automation` | `/automation` | Status, start/stop, run-cycle, create-campaigns, optimize, push-live, activity-log |
 
 **Database:** PostgreSQL on Neon (`ep-delicate-queen-ah2ayed9.c-3.us-east-1.aws.neon.tech/neondb`)
 Tables: products, campaigns, meta_tokens, tiktok_tokens, activity_logs, settings
 
-**Scheduler** (`scheduler.py`): APScheduler runs:
+**Scheduler** (`scheduler.py`): APScheduler runs 6 jobs:
+- Daily optimization at midnight CST (06:00 UTC cron trigger) — Phase 11
+- Optimization every 6 hours (interval, intra-day)
 - Performance sync every 2 hours
-- Optimization every 6 hours (with proper DB session — Phase 8 fix)
+- Hourly spend check (compares active budgets vs daily_spend_limit, alerts at 90%) — Phase 11
+- Scheduler heartbeat tick every hour (proof-of-life logging) — Phase 11
 - Shopify token refresh every 20 hours
 
 ## Key Files
@@ -84,7 +87,8 @@ Tables: products, campaigns, meta_tokens, tiktok_tokens, activity_logs, settings
 - `app/services/sitemap.py` — XML sitemap generator (Phase 7)
 - `app/database.py` — SQLAlchemy models, session management, PendingRollbackError recovery (Phase 8)
 - `app/schemas.py` — Pydantic request/response models
-- `scheduler.py` — Background task scheduling (Phase 8: proper SessionLocal() for optimizer)
+- `scheduler.py` — 6 background jobs: midnight CST optimization, 6h interval, 2h perf sync, hourly spend check, hourly tick, 20h Shopify token (Phase 11)
+- `SMOKE_TEST_RESULTS.md` — Production endpoint smoke test audit (Phase 11)
 - `templates/dashboard.html` — Dashboard UI with 7 tabs (Phase 9: revenue display, ROAS cards)
 - `shopify.app.toml` — Shopify app config with all required scopes
 
@@ -216,11 +220,11 @@ git reset --hard origin/main
 - Republish wipes .git directory (no longer matters since workspace IS the checkout)
 - deploy/pull wrote to wrong location (now workspace and deploy target are the same)
 
-## Project Completion Assessment (~70%)
+## Project Completion Assessment (~75%)
 
 | Component | Status | % |
 |-----------|--------|---|
-| Platform infrastructure | FastAPI, DB, scheduler, deploy | 90% |
+| Platform infrastructure | FastAPI, DB, scheduler (6 jobs), deploy, smoke-tested | 95% |
 | Meta Ads integration | OAuth, campaigns, sync, budget, CBO, ad creative CRUD, full-structure | 90% |
 | Shopify integration | Token, products, webhooks, discounts, customers | 80% |
 | Dashboard | 7 tabs, Meta metrics, SEO, system health, optimize-now | 80% |
@@ -230,7 +234,7 @@ git reset --hard origin/main
 | Klaviyo/email | Router exists, auto-init with fallback key, DB fallback | 40% |
 | TikTok integration | OAuth + read-only, no optimization | 25% |
 | Google Ads integration | Router exists, no credentials | 15% |
-| Automated campaign creation | Service stubs exist, not wired up | 10% |
+| AI ad copy generation | POST /campaigns/generate via Claude Haiku, stores in DB | 60% |
 | Notifications/alerts | NotificationService wired into optimizer, logs auto-actions | 40% |
 
 ## Known Bugs
@@ -251,6 +255,15 @@ git reset --hard origin/main
 ### BUG-6: Optimizer CBO budget changes — FIXED in v1.10.0
 ✅ Optimizer `_execute_meta_budget_change()` tries campaign-level CBO first, falls back to adset-level.
 
+### BUG-7: Automation router fails to load — FIXED in v2.3.0
+`app/routers/automation.py` used `Query` from fastapi on line 216 but never imported it. Router silently failed to load (12/13 routers). Fixed by adding `Query` to the import.
+
+### BUG-8: Shopify /products/{id} returns 500 for invalid IDs — FIXED in v2.3.0
+Shopify API 404 errors propagated as unhandled 500s. Wrapped in try/except with proper HTTPException(404).
+
+### BUG-9: Shopify /collections/{id}/products returns 500 for invalid IDs — FIXED in v2.3.0
+Same fix as BUG-8.
+
 ## Dashboard Tabs
 
 1. **Overview** — KPIs, optimization progress bars, product/collection counts
@@ -268,7 +281,7 @@ See Replit Secrets. Key vars:
 `META_PAGE_ID` (required for ad creative creation),
 `TIKTOK_ACCESS_TOKEN`, `TIKTOK_ADVERTISER_ID`, `SHOPIFY_CLIENT_ID`,
 `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_STORE`, `DEPLOY_KEY`, `KLAVIYO_API_KEY`,
-`GITHUB_WEBHOOK_SECRET`
+`GITHUB_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY` (required for AI ad copy generation)
 
 ## Key Conventions
 
@@ -296,3 +309,6 @@ See Replit Secrets. Key vars:
 - **Phase 10A:** Optimizer + campaign_generator settings load fix (key/value store), phantom campaign purge (DELETE /cleanup), manual optimize trigger (POST /optimize-now), Klaviyo auto-init env→DB, daily_budget sync from Meta (cents→dollars) (v2.0.0)
 - **Phase 10B:** Meta ad creative CRUD API — adset/ad query, full-structure, create-ad, update/delete ads (v2.1.0)
 - **Phase 10C:** Klaviyo hardcoded fallback key, NotificationService wired into optimizer, version bump to v2.2.0
+- **Phase 11A:** Production smoke test — 51/54 endpoints pass. Fixed BUG-7 (automation router missing Query import), BUG-8/9 (Shopify 500s on invalid IDs). Created SMOKE_TEST_RESULTS.md.
+- **Phase 11B:** Scheduler upgrade — midnight CST daily optimization (CronTrigger), hourly spend check with 90% utilization alerts, hourly heartbeat tick. 6 total jobs.
+- **Phase 11C:** AI ad copy pipeline — POST /campaigns/generate calls Claude Haiku 4.5 to generate 3 ad variants per product. Stores as draft campaign in DB. (v2.3.0)
