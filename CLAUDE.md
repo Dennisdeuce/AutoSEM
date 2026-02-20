@@ -9,9 +9,9 @@ AutoSEM is an autonomous advertising platform built with FastAPI. It manages mul
 **Store:** https://court-sportswear.com
 **Repo:** https://github.com/Dennisdeuce/AutoSEM (branch: main)
 
-## Current Version: 2.0.0
+## Current Version: 2.2.0
 
-13 routers, 75+ endpoints. Optimizer settings load fixed (key/value store). Phantom campaign cleanup endpoint (DELETE). Manual optimize trigger (POST /dashboard/optimize-now). Klaviyo auto-init from env to DB on every request. Performance sync writes daily_budget from Meta (cents→dollars). Revenue confirmed: $82.98 from 2 orders, 2.05x ROAS (verified via /health/deep). Optimization engine fully operational with CBO-aware budget changes.
+13 routers, 85+ endpoints. Meta ad creative CRUD API (query adsets/ads, create/update/delete ads). NotificationService wired into optimizer for auto-action alerts. Klaviyo auto-init with hardcoded fallback key. Revenue confirmed: $82.98 from 2 orders, 2.05x ROAS (verified via /health/deep). Meta campaigns: Ongoing (120206746647300364) $20/day, Sales (120241759616260364) $5/day. Klaviyo key: pk_8331b081008957a6922794034954df1d69.
 
 ## Commands
 
@@ -40,7 +40,7 @@ No test framework configured. Use Swagger UI or curl for testing.
 | Router | Prefix | Purpose |
 |--------|--------|---------|
 | `dashboard` | `/dashboard` | Aggregated metrics, sync-meta, optimize-now, activity log, emergency controls |
-| `meta` | `/meta` | Meta/Facebook OAuth, campaigns, activate/pause/set-budget (CBO + adset) |
+| `meta` | `/meta` | OAuth, campaigns, activate/pause/set-budget (CBO), ad creative CRUD, full-structure query |
 | `tiktok` | `/tiktok` | TikTok OAuth, campaign launch, video generation, targeting |
 | `campaigns` | `/campaigns` | CRUD for campaign records, /active, DELETE /cleanup phantom purge |
 | `products` | `/products` | Shopify product sync and management |
@@ -66,13 +66,15 @@ Tables: products, campaigns, meta_tokens, tiktok_tokens, activity_logs, settings
 - `main.py` — FastAPI app factory, router registration, version
 - `app/version.py` — Single source of truth for VERSION
 - `app/routers/` — All 13 API router modules
-- `app/routers/meta.py` — CBO-aware budget updates (try campaign-level first, fallback to adset)
+- `app/routers/meta.py` — CBO budget, ad creative CRUD, adset/ad query, full-structure (Phase 10B)
 - `app/routers/deploy.py` — Deploy with os._exit(0) restart (Phase 8 fix)
 - `app/routers/seo.py` — JSON-LD and sitemap endpoints (Phase 7)
 - `app/routers/health.py` — Deep health + GET /reset-db (Phase 8)
 - `app/routers/shopify.py` — Webhooks, customers, discounts, order webhook handler (Phase 9)
 - `app/services/meta_ads.py` — Meta API with appsecret_proof, adset discovery
-- `app/services/optimizer.py` — Auto-actions: budget scaling, pausing, CPC rules, key/value settings load (Phase 10 fix)
+- `app/services/optimizer.py` — Auto-actions with NotificationService, budget scaling, pausing, CPC rules (Phase 10 fix)
+- `app/services/notifications.py` — NotificationService: order, auto-action, spend alert logging (Phase 10C)
+- `app/services/campaign_generator.py` — Campaign generation from products, key/value settings load (Phase 10A fix)
 - `app/services/performance_sync.py` — Meta insights sync, writes all metrics + daily_budget to CampaignModel (Phase 10 fix)
 - `app/services/klaviyo_service.py` — Abandoned cart flow, DB key fallback (Phase 7)
 - `app/services/shopify_token.py` — Centralized token manager with DB persistence
@@ -97,7 +99,7 @@ Tables: products, campaigns, meta_tokens, tiktok_tokens, activity_logs, settings
 
 **⚠️ Both campaigns use Campaign Budget Optimization (CBO)** — budget is set at campaign level, not adset level. The `/meta/set-budget` endpoint handles this (tries campaign first, falls back to adset).
 
-**Ad destination URLs:** Ongoing campaign name includes "http://www.court-sportswear.com/" indicating ads point to **homepage**. Should be changed to `/collections/all-mens-t-shirts` for better conversion. No API endpoint currently exists to query/change ad creative destination URLs.
+**Ad destination URLs:** Ongoing campaign name includes "http://www.court-sportswear.com/" indicating ads point to **homepage**. Should be changed to `/collections/all-mens-t-shirts` for better conversion. Use GET /meta/campaigns/{id}/full-structure to inspect current ad creatives, then POST /meta/create-ad to create new ads with correct destination URLs.
 
 ## Optimizer Auto-Actions (Phase 4)
 
@@ -135,7 +137,9 @@ The optimizer runs every 6h and executes real Meta API actions:
 - Token stored in DB meta_tokens table, 45 days remaining (as of Feb 20)
 - All API calls require `appsecret_proof` (HMAC-SHA256)
 - CBO budget updates working at campaign level
-- Env vars: `META_ACCESS_TOKEN`, `META_APP_SECRET`, `META_AD_ACCOUNT_ID`
+- **Ad creative CRUD (Phase 10B):** query adsets/ads, create ads with image+copy, update/delete ads
+- **Full structure query:** GET /meta/campaigns/{id}/full-structure returns campaign→adsets→ads tree
+- Env vars: `META_ACCESS_TOKEN`, `META_APP_SECRET`, `META_AD_ACCOUNT_ID`, `META_PAGE_ID`
 - `graph.facebook.com` is blocked in Claude's bash — proxy through AutoSEM endpoints
 
 ### TikTok Ads
@@ -145,7 +149,7 @@ The optimizer runs every 6h and executes real Meta API actions:
 
 ### Klaviyo
 - API key: `pk_8331b081008957a6922794034954df1d69`
-- ✅ **Auto-init (Phase 10):** On any /klaviyo/* request, key is auto-written from env to DB if missing
+- ✅ **Auto-init (Phase 10C):** On any /klaviyo/* request, key is auto-written to DB from env or hardcoded fallback
 - DB fallback via POST /klaviyo/set-key also available for manual override
 - 3-email abandoned cart flow ready to deploy once key loads
 - **No Klaviyo email capture popup on store** — this is a major gap
@@ -217,17 +221,17 @@ git reset --hard origin/main
 | Component | Status | % |
 |-----------|--------|---|
 | Platform infrastructure | FastAPI, DB, scheduler, deploy | 90% |
-| Meta Ads integration | OAuth, campaigns, sync, budget, pause/activate, CBO | 85% |
+| Meta Ads integration | OAuth, campaigns, sync, budget, CBO, ad creative CRUD, full-structure | 90% |
 | Shopify integration | Token, products, webhooks, discounts, customers | 80% |
 | Dashboard | 7 tabs, Meta metrics, SEO, system health, optimize-now | 80% |
 | Order tracking/attribution | Webhook registered, handler built, UTM parsing | 70% |
 | Optimizer engine | Settings fixed, CBO budget changes, manual trigger, data pipeline working | 85% |
 | Performance sync → DB | Writes all metrics + daily_budget to CampaignModel | 85% |
-| Klaviyo/email | Router exists, auto-init from env, DB fallback | 35% |
+| Klaviyo/email | Router exists, auto-init with fallback key, DB fallback | 40% |
 | TikTok integration | OAuth + read-only, no optimization | 25% |
 | Google Ads integration | Router exists, no credentials | 15% |
 | Automated campaign creation | Service stubs exist, not wired up | 10% |
-| Notifications/alerts | Directory exists, no implementation | 5% |
+| Notifications/alerts | NotificationService wired into optimizer, logs auto-actions | 40% |
 
 ## Known Bugs
 
@@ -261,6 +265,7 @@ git reset --hard origin/main
 
 See Replit Secrets. Key vars:
 `DATABASE_URL`, `META_ACCESS_TOKEN`, `META_APP_SECRET`, `META_AD_ACCOUNT_ID`,
+`META_PAGE_ID` (required for ad creative creation),
 `TIKTOK_ACCESS_TOKEN`, `TIKTOK_ADVERTISER_ID`, `SHOPIFY_CLIENT_ID`,
 `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_STORE`, `DEPLOY_KEY`, `KLAVIYO_API_KEY`,
 `GITHUB_WEBHOOK_SECRET`
@@ -288,4 +293,6 @@ See Replit Secrets. Key vars:
 - **Phase 7:** Shopify TOML, Klaviyo DB fallback, JSON-LD, sitemap (v1.7.0)
 - **Phase 8:** Deploy restart fix (os._exit), scheduler DB session, dashboard SEO/activity-log/version, DB error recovery (v1.8.0)
 - **Phase 9:** Order webhook handler, discount codes (WELCOME10), customer endpoint, revenue dashboard, CBO budget fix, workspace git checkout, Shopify scopes activated (v1.9.0)
-- **Phase 10:** Optimizer settings load fix (key/value store), phantom campaign purge (DELETE /cleanup), manual optimize trigger (POST /optimize-now), Klaviyo auto-init env→DB, daily_budget sync from Meta (cents→dollars), version bump to v2.0.0
+- **Phase 10A:** Optimizer + campaign_generator settings load fix (key/value store), phantom campaign purge (DELETE /cleanup), manual optimize trigger (POST /optimize-now), Klaviyo auto-init env→DB, daily_budget sync from Meta (cents→dollars) (v2.0.0)
+- **Phase 10B:** Meta ad creative CRUD API — adset/ad query, full-structure, create-ad, update/delete ads (v2.1.0)
+- **Phase 10C:** Klaviyo hardcoded fallback key, NotificationService wired into optimizer, version bump to v2.2.0

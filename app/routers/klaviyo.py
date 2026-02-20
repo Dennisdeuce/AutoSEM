@@ -31,20 +31,23 @@ KLAVIYO_REVISION = "2024-10-15"
 service = KlaviyoService()
 
 
+KLAVIYO_FALLBACK_KEY = "pk_8331b081008957a6922794034954df1d69"
+
+
 def _ensure_klaviyo_key_in_db(db: Session):
-    """Auto-init: if klaviyo_api_key is missing from DB but present in env, write it."""
+    """Auto-init: if klaviyo_api_key is missing from DB, try env then hardcoded fallback."""
     try:
         row = db.query(SettingsModel).filter(SettingsModel.key == "klaviyo_api_key").first()
         if row and row.value:
             return  # already in DB
-        env_key = os.environ.get("KLAVIYO_API_KEY", "")
-        if env_key:
+        key = os.environ.get("KLAVIYO_API_KEY", "") or KLAVIYO_FALLBACK_KEY
+        if key:
             if row:
-                row.value = env_key
+                row.value = key
             else:
-                db.add(SettingsModel(key="klaviyo_api_key", value=env_key))
+                db.add(SettingsModel(key="klaviyo_api_key", value=key))
             db.commit()
-            logger.info("Klaviyo auto-init: wrote KLAVIYO_API_KEY from env to DB")
+            logger.info("Klaviyo auto-init: wrote API key to DB")
     except Exception as e:
         logger.warning(f"Klaviyo auto-init failed: {e}")
 

@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 from app.database import CampaignModel, SettingsModel, ActivityLogModel, MetaTokenModel
 from app.services.meta_ads import MetaAdsService
+from app.services.notifications import NotificationService
 
 logger = logging.getLogger("autosem.optimizer")
 
@@ -31,6 +32,7 @@ class CampaignOptimizer:
     def __init__(self, db: Session):
         self.db = db
         self.meta = MetaAdsService()
+        self.notifier = NotificationService(db)
         self._load_db_token()
         self.settings = self._load_settings()
 
@@ -103,6 +105,7 @@ class CampaignOptimizer:
             result = {"executed": api_result.get("success", False), "api_result": api_result}
         campaign.status = "paused"
         self._log_auto_optimize(campaign, "pause", reason)
+        self.notifier.notify_auto_action("pause", f"{campaign.name}: {reason}")
         return result
 
     def _execute_meta_budget_change(self, campaign: CampaignModel, new_budget: float, reason: str) -> Dict:
@@ -126,6 +129,7 @@ class CampaignOptimizer:
         old_budget = campaign.daily_budget
         campaign.daily_budget = round(new_budget, 2)
         self._log_auto_optimize(campaign, "budget_change", f"{reason} (${old_budget} -> ${new_budget:.2f})")
+        self.notifier.notify_auto_action("budget_change", f"{campaign.name}: ${old_budget} -> ${new_budget:.2f}")
         return result
 
     def _log_auto_optimize(self, campaign: CampaignModel, action_type: str, reason: str):
