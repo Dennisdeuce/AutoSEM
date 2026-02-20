@@ -16,12 +16,37 @@ from app.database import get_db, ActivityLogModel, SettingsModel
 from app.services.klaviyo_service import KlaviyoService, _get_klaviyo_key
 
 logger = logging.getLogger("AutoSEM.Klaviyo")
-router = APIRouter()
+
+
+def _klaviyo_auto_init(db: Session = Depends(get_db)):
+    """Router-level dependency: auto-init Klaviyo key from env to DB on every request."""
+    _ensure_klaviyo_key_in_db(db)
+
+
+router = APIRouter(dependencies=[Depends(_klaviyo_auto_init)])
 
 KLAVIYO_BASE_URL = "https://a.klaviyo.com/api"
 KLAVIYO_REVISION = "2024-10-15"
 
 service = KlaviyoService()
+
+
+def _ensure_klaviyo_key_in_db(db: Session):
+    """Auto-init: if klaviyo_api_key is missing from DB but present in env, write it."""
+    try:
+        row = db.query(SettingsModel).filter(SettingsModel.key == "klaviyo_api_key").first()
+        if row and row.value:
+            return  # already in DB
+        env_key = os.environ.get("KLAVIYO_API_KEY", "")
+        if env_key:
+            if row:
+                row.value = env_key
+            else:
+                db.add(SettingsModel(key="klaviyo_api_key", value=env_key))
+            db.commit()
+            logger.info("Klaviyo auto-init: wrote KLAVIYO_API_KEY from env to DB")
+    except Exception as e:
+        logger.warning(f"Klaviyo auto-init failed: {e}")
 
 
 def _get_api_key() -> str:

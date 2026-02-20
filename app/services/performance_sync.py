@@ -108,6 +108,10 @@ class PerformanceSyncService:
                     campaign.revenue = revenue
                     campaign.total_revenue = revenue
                     campaign.roas = round(roas, 2)
+                    # Sync daily_budget from Meta (returned in cents)
+                    raw_budget = row.get("daily_budget", 0)
+                    if raw_budget:
+                        campaign.daily_budget = float(raw_budget) / 100
                     campaign.updated_at = datetime.now(timezone.utc)
                     synced += 1
                     details.append(

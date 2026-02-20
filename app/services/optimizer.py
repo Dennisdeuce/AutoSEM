@@ -46,20 +46,21 @@ class CampaignOptimizer:
             logger.warning(f"Optimizer: failed to load Meta token from DB: {e}")
 
     def _load_settings(self) -> dict:
-        settings = self.db.query(SettingsModel).first()
-        if settings:
-            return {
-                "daily_spend_limit": settings.daily_spend_limit,
-                "monthly_spend_limit": settings.monthly_spend_limit,
-                "min_roas_threshold": settings.min_roas_threshold,
-                "emergency_pause_loss": settings.emergency_pause_loss,
-            }
-        return {
+        """Load optimizer settings from SettingsModel key/value store."""
+        defaults = {
             "daily_spend_limit": 200.0,
             "monthly_spend_limit": 5000.0,
             "min_roas_threshold": 1.5,
             "emergency_pause_loss": 500.0,
         }
+        result = {}
+        for key, default in defaults.items():
+            try:
+                row = self.db.query(SettingsModel).filter(SettingsModel.key == key).first()
+                result[key] = float(row.value) if row and row.value else default
+            except (ValueError, TypeError):
+                result[key] = default
+        return result
 
     def optimize_all(self) -> Dict:
         campaigns = self.db.query(CampaignModel).filter(

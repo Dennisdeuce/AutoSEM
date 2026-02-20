@@ -15,14 +15,17 @@ logger = logging.getLogger("AutoSEM.Campaigns")
 router = APIRouter()
 
 
-@router.post("/cleanup", summary="Clean up stale campaigns",
-             description="Delete campaigns with $0 spend and status not active. Removes phantom/stale records.")
+@router.delete("/cleanup", summary="Purge phantom campaigns",
+               description="Delete campaigns with zero spend/clicks/impressions, preserving the two known active Meta campaigns.")
 def cleanup_campaigns(db: Session = Depends(get_db)):
-    """Remove stale campaigns: $0 spend AND not active status."""
+    """Purge phantom campaigns: $0 spend, 0 clicks, 0 impressions — except known active campaigns."""
+    PROTECTED_IDS = ["120241759616260364", "120206746647300364"]
+
     stale = db.query(CampaignModel).filter(
-        ~CampaignModel.status.in_(["active", "ACTIVE", "live"]),
         (CampaignModel.total_spend == None) | (CampaignModel.total_spend == 0),
-        (CampaignModel.spend == None) | (CampaignModel.spend == 0),
+        (CampaignModel.clicks == None) | (CampaignModel.clicks == 0),
+        (CampaignModel.impressions == None) | (CampaignModel.impressions == 0),
+        ~CampaignModel.platform_campaign_id.in_(PROTECTED_IDS),
     ).all()
 
     deleted_count = len(stale)
@@ -35,22 +38,20 @@ def cleanup_campaigns(db: Session = Depends(get_db)):
         log = ActivityLogModel(
             action="CAMPAIGN_CLEANUP",
             entity_type="system",
-            details=f"Deleted {deleted_count} stale campaigns with $0 spend",
+            details=f"Purged {deleted_count} phantom campaigns (zero spend/clicks/impressions)",
         )
         db.add(log)
 
     db.commit()
 
-    # Count remaining
     remaining = db.query(CampaignModel).count()
     active = db.query(CampaignModel).filter(
         CampaignModel.status.in_(["active", "ACTIVE", "live"])
     ).count()
 
     return {
-        "status": "ok",
         "deleted": deleted_count,
-        "deleted_campaigns": deleted_names[:20],  # Cap output
+        "deleted_campaigns": deleted_names[:20],
         "remaining": remaining,
         "active": active,
     }
