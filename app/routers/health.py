@@ -21,6 +21,25 @@ logger = logging.getLogger("AutoSEM.Health")
 router = APIRouter()
 
 
+@router.get("/env-check", summary="Check which env vars are available",
+            description="Returns boolean presence of key environment variables (never reveals values)")
+def env_check():
+    """Diagnostic: check which expected env vars are present in the runtime."""
+    keys = [
+        "ANTHROPIC_API_KEY",
+        "META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID", "META_APP_ID", "META_APP_SECRET",
+        "TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID",
+        "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET", "SHOPIFY_ACCESS_TOKEN",
+        "KLAVIYO_API_KEY",
+        "DATABASE_URL",
+    ]
+    result = {}
+    for k in keys:
+        val = os.environ.get(k, "")
+        result[k] = {"present": bool(val), "length": len(val) if val else 0}
+    return {"env_vars": result, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
 @router.get("/deep", summary="Deep health check",
             description="Structured system status: DB, tokens, scheduler, campaigns, spend/revenue")
 def deep_health(db: Session = Depends(get_db)):
