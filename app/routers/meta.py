@@ -735,3 +735,66 @@ def delete_ad(ad_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Failed to delete ad {ad_id}: {e}")
         return {"status": "error", "message": str(e)}
+
+
+@router.get("/ad-images", summary="List ad account images",
+            description="List images uploaded to the ad account with their hashes")
+def list_ad_images(limit: int = Query(25, ge=1, le=100), db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+    if not META_AD_ACCOUNT_ID:
+        return {"status": "error", "message": "META_AD_ACCOUNT_ID not set"}
+
+    try:
+        resp = requests.get(
+            f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/adimages",
+            params={
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+                "fields": "hash,name,url,url_128,created_time,status",
+                "limit": limit,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        return {"status": "ok", "count": len(data), "images": data}
+    except requests.exceptions.HTTPError as e:
+        error_body = e.response.text if e.response else str(e)
+        return {"status": "error", "message": error_body}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/upload-image", summary="Upload image to ad account by URL",
+             description="Upload an image from URL to the ad account, returns image_hash")
+def upload_ad_image(image_url: str = Query(...), name: str = Query("ad_image"), db: Session = Depends(get_db)):
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+    if not META_AD_ACCOUNT_ID:
+        return {"status": "error", "message": "META_AD_ACCOUNT_ID not set"}
+
+    try:
+        resp = requests.post(
+            f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/adimages",
+            params={
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            json={"url": image_url, "name": name},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        images = result.get("images", {})
+        if images:
+            img_data = list(images.values())[0]
+            return {"status": "ok", "image_hash": img_data.get("hash"), "name": name, "data": img_data}
+        return {"status": "ok", "result": result}
+    except requests.exceptions.HTTPError as e:
+        error_body = e.response.text if e.response else str(e)
+        return {"status": "error", "message": error_body}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
