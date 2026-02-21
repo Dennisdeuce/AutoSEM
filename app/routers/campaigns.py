@@ -8,6 +8,7 @@ import logging
 from typing import List, Optional
 from datetime import datetime
 
+import requests as http_requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -17,6 +18,9 @@ from app.schemas import Campaign, CampaignCreate, CampaignUpdate
 
 logger = logging.getLogger("AutoSEM.Campaigns")
 router = APIRouter()
+
+# In-memory cache for API key (set via /set-anthropic-key or env var)
+_anthropic_key_cache = {"key": ""}
 
 
 # ─── Ad Copy Generation Models ────────────────────────────────────
@@ -28,6 +32,30 @@ class GenerateAdCopyRequest(BaseModel):
     product_url: Optional[str] = None
     target_audience: Optional[str] = "tennis and pickleball players"
     platform: str = "meta"
+
+
+class SetAnthropicKeyRequest(BaseModel):
+    api_key: str
+
+
+@router.post("/set-anthropic-key", summary="Set Anthropic API key at runtime",
+             description="Store the Anthropic API key in memory for AI ad copy generation. "
+                         "Persists until app restart. Use when env var isn't available.")
+def set_anthropic_key(req: SetAnthropicKeyRequest):
+    """Set the Anthropic API key without needing env vars or Republish."""
+    if not req.api_key or len(req.api_key) < 10:
+        return {"status": "error", "message": "Invalid API key"}
+    _anthropic_key_cache["key"] = req.api_key
+    prefix = req.api_key[:12] + "..."
+    logger.info(f"Anthropic API key set via endpoint: {prefix}")
+    return {"status": "ok", "key_prefix": prefix, "message": "Key stored in memory. Will persist until app restart."}
+
+
+def _get_anthropic_key() -> str:
+    """Get Anthropic API key from cache first, then env var."""
+    if _anthropic_key_cache["key"]:
+        return _anthropic_key_cache["key"]
+    return os.environ.get("ANTHROPIC_API_KEY", "")
 
 
 @router.post("/purge-phantoms", summary="Purge phantom campaigns",
@@ -149,17 +177,22 @@ Return an array of exactly 3 variant objects, each with keys: headline, primary_
 
 @router.post("/generate", summary="Generate AI ad copy variants",
              description="Uses Claude API to generate 3 ad copy variants for a product. "
-                         "Stores winning copy in campaign headlines/descriptions fields.")
+                         "Stores winning copy in campaign headlines/descriptions fields. "
+                         "If ANTHROPIC_API_KEY env var is not set, use POST /set-anthropic-key first.")
 def generate_ad_copy(req: GenerateAdCopyRequest, db: Session = Depends(get_db)):
-    """Generate 3 ad copy variants for a product using Claude AI."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    """Generate 3 ad copy variants for a product using Claude AI.
+
+    Uses requests library directly (no anthropic SDK needed).
+    Key lookup: in-memory cache (set via /set-anthropic-key) → env var.
+    """
+    api_key = _get_anthropic_key()
     if not api_key:
-        return {"status": "error", "message": "ANTHROPIC_API_KEY not configured"}
+        return {
+            "status": "error",
+            "message": "ANTHROPIC_API_KEY not configured. Use POST /api/v1/campaigns/set-anthropic-key to set it.",
+        }
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-
         user_prompt = f"""Generate 3 ad copy variants for this product:
 
 Product: {req.product_name}
@@ -171,14 +204,31 @@ Platform: {req.platform}
 
 Return JSON array of 3 variants. Each variant must have: headline, primary_text, description, cta"""
 
-        response = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=1024,
-            system=AD_COPY_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
+        # Call Anthropic API directly via requests (no SDK dependency)
+        resp = http_requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20250929",
+                "max_tokens": 1024,
+                "system": AD_COPY_SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": user_prompt}],
+            },
+            timeout=30,
         )
 
-        raw_text = response.content[0].text.strip()
+        if resp.status_code != 200:
+            error_body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:500]
+            return {"status": "error", "message": f"Anthropic API returned {resp.status_code}", "detail": error_body}
+
+        data = resp.json()
+        raw_text = data["content"][0]["text"].strip()
+        input_tokens = data.get("usage", {}).get("input_tokens", 0)
+        output_tokens = data.get("usage", {}).get("output_tokens", 0)
 
         # Parse the JSON response
         try:
@@ -227,10 +277,10 @@ Return JSON array of 3 variants. Each variant must have: headline, primary_text,
             "status": "ok",
             "campaign_id": campaign.id,
             "variants": variants,
-            "model_used": "claude-haiku-4-5",
+            "model_used": "claude-haiku-4-5-20250929",
             "tokens_used": {
-                "input": response.usage.input_tokens,
-                "output": response.usage.output_tokens,
+                "input": input_tokens,
+                "output": output_tokens,
             },
         }
 
