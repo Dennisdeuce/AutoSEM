@@ -1,10 +1,14 @@
 """
 Klaviyo router - Email Marketing + Abandoned Cart Flows
 Uses KlaviyoService for business logic. Revision 2024-10-15.
+Phase 13: Removed hardcoded fallback key, added validate-key, diagnose,
+          retry logic, health integration, status caching.
 """
 
 import os
+import time
 import logging
+from datetime import datetime, timezone
 
 import requests
 from fastapi import APIRouter, Depends, Query
@@ -13,7 +17,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.database import get_db, ActivityLogModel, SettingsModel
-from app.services.klaviyo_service import KlaviyoService, _get_klaviyo_key
+from app.services.klaviyo_service import KlaviyoService, _get_klaviyo_key, _klaviyo_diag
 
 logger = logging.getLogger("AutoSEM.Klaviyo")
 
@@ -30,24 +34,25 @@ KLAVIYO_REVISION = "2024-10-15"
 
 service = KlaviyoService()
 
-
-KLAVIYO_FALLBACK_KEY = "pk_8331b081008957a6922794034954df1d69"
+# Status cache: avoid hammering Klaviyo /accounts on every call
+_status_cache = {"data": None, "expires_at": 0.0}
+STATUS_CACHE_TTL = 60  # seconds
 
 
 def _ensure_klaviyo_key_in_db(db: Session):
-    """Auto-init: if klaviyo_api_key is missing from DB, try env then hardcoded fallback."""
+    """Auto-init: if klaviyo_api_key is missing from DB, try env var only (no hardcoded keys)."""
     try:
         row = db.query(SettingsModel).filter(SettingsModel.key == "klaviyo_api_key").first()
         if row and row.value:
             return  # already in DB
-        key = os.environ.get("KLAVIYO_API_KEY", "") or KLAVIYO_FALLBACK_KEY
+        key = os.environ.get("KLAVIYO_API_KEY", "")
         if key:
             if row:
                 row.value = key
             else:
                 db.add(SettingsModel(key="klaviyo_api_key", value=key))
             db.commit()
-            logger.info("Klaviyo auto-init: wrote API key to DB")
+            logger.info("Klaviyo auto-init: wrote API key to DB from env")
     except Exception as e:
         logger.warning(f"Klaviyo auto-init failed: {e}")
 
@@ -67,16 +72,27 @@ def _klaviyo_headers():
 
 
 def _klaviyo_request(method: str, path: str, payload: dict = None):
-    """Make an authenticated request to Klaviyo API."""
+    """Make an authenticated request to Klaviyo API with retry + exponential backoff (3 attempts)."""
     url = f"{KLAVIYO_BASE_URL}/{path.lstrip('/')}"
-    resp = requests.request(
-        method, url,
-        headers=_klaviyo_headers(),
-        json=payload,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json() if resp.content else {}
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = requests.request(
+                method, url,
+                headers=_klaviyo_headers(),
+                json=payload,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            _klaviyo_diag["last_success_ts"] = time.time()
+            return resp.json() if resp.content else {}
+        except Exception as e:
+            last_exc = e
+            _klaviyo_diag["last_error_msg"] = str(e)
+            if attempt < 2:
+                wait = 2 ** attempt  # 1s, 2s
+                time.sleep(wait)
+    raise last_exc
 
 
 def _log_activity(db: Session, action: str, entity_id: str = None, details: str = None):
@@ -105,6 +121,10 @@ class SetKeyRequest(BaseModel):
     api_key: str
 
 
+class ValidateKeyRequest(BaseModel):
+    api_key: str
+
+
 # ─── Endpoints ───────────────────────────────────────────────────
 
 @router.post("/set-key", summary="Set Klaviyo API key",
@@ -130,6 +150,9 @@ def set_klaviyo_key(req: SetKeyRequest, db: Session = Depends(get_db)):
         except Exception:
             pass
 
+        # Invalidate status cache
+        _status_cache["expires_at"] = 0
+
         return {
             "status": "ok",
             "message": "Klaviyo API key saved",
@@ -140,17 +163,95 @@ def set_klaviyo_key(req: SetKeyRequest, db: Session = Depends(get_db)):
         return {"status": "error", "message": str(e)}
 
 
+@router.post("/validate-key", summary="Validate a Klaviyo API key",
+             description="Test a key against Klaviyo accounts API. If valid, saves to DB.")
+def validate_klaviyo_key(req: ValidateKeyRequest, db: Session = Depends(get_db)):
+    """Test key against GET https://a.klaviyo.com/api/accounts/, save to DB if valid."""
+    try:
+        test_headers = {
+            "Authorization": f"Klaviyo-API-Key {req.api_key}",
+            "revision": KLAVIYO_REVISION,
+            "Accept": "application/json",
+        }
+        resp = requests.get(
+            f"{KLAVIYO_BASE_URL}/accounts/",
+            headers=test_headers,
+            timeout=15,
+        )
+
+        if resp.status_code == 401:
+            return {"status": "error", "valid": False, "message": "Invalid API key — Klaviyo returned 401"}
+
+        resp.raise_for_status()
+        data = resp.json()
+        accounts = data.get("data", [])
+        account_name = ""
+        if accounts:
+            account_name = accounts[0].get("attributes", {}).get("contact_information", {}).get("organization_name", "")
+
+        # Key is valid — save to DB
+        row = db.query(SettingsModel).filter(SettingsModel.key == "klaviyo_api_key").first()
+        if row:
+            row.value = req.api_key
+        else:
+            row = SettingsModel(key="klaviyo_api_key", value=req.api_key)
+            db.add(row)
+        db.commit()
+
+        service.reload_key()
+        _status_cache["expires_at"] = 0  # invalidate cache
+
+        _log_activity(db, "KLAVIYO_KEY_VALIDATED", details=f"Key validated and saved. Account: {account_name}")
+
+        return {
+            "status": "ok",
+            "valid": True,
+            "message": "API key valid and saved to DB",
+            "account_name": account_name,
+        }
+    except requests.exceptions.HTTPError as e:
+        return {"status": "error", "valid": False, "message": f"Klaviyo API error: {e}"}
+    except Exception as e:
+        return {"status": "error", "valid": False, "message": str(e)}
+
+
+@router.get("/diagnose", summary="Diagnose Klaviyo key status",
+            description="Returns key source, masked prefix, last success time, last error")
+def diagnose_klaviyo():
+    key = _get_api_key()
+    key_prefix = (key[:8] + "****") if key and len(key) > 8 else ("(empty)" if not key else key[:4] + "****")
+
+    last_success = None
+    if _klaviyo_diag.get("last_success_ts"):
+        last_success = datetime.fromtimestamp(_klaviyo_diag["last_success_ts"], tz=timezone.utc).isoformat()
+
+    return {
+        "status": "ok",
+        "key_source": _klaviyo_diag.get("last_key_source", "unknown"),
+        "key_prefix": key_prefix,
+        "key_present": bool(key),
+        "last_successful_api_call": last_success,
+        "last_error": _klaviyo_diag.get("last_error_msg"),
+    }
 
 
 @router.get("/status", summary="Check Klaviyo status",
-            description="Validate API key by fetching account info")
+            description="Validate API key by fetching account info (cached 60s)")
 def klaviyo_status():
+    # Return cached result if fresh
+    now = time.time()
+    if _status_cache["data"] is not None and now < _status_cache["expires_at"]:
+        return _status_cache["data"]
+
     if not _get_api_key():
-        return {
+        result = {
             "status": "not_configured",
             "connected": False,
             "message": "KLAVIYO_API_KEY not set",
         }
+        _status_cache["data"] = result
+        _status_cache["expires_at"] = now + STATUS_CACHE_TTL
+        return result
 
     try:
         data = _klaviyo_request("GET", "/accounts/")
@@ -158,19 +259,25 @@ def klaviyo_status():
         if accounts:
             account = accounts[0]
             attrs = account.get("attributes", {})
-            return {
+            result = {
                 "status": "ok",
                 "connected": True,
                 "account_name": attrs.get("contact_information", {}).get("organization_name", ""),
                 "public_api_key": attrs.get("contact_information", {}).get("default_sender_email", ""),
             }
-        return {"status": "ok", "connected": True, "message": "API key valid"}
+        else:
+            result = {"status": "ok", "connected": True, "message": "API key valid"}
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 401:
-            return {"status": "error", "connected": False, "message": "Invalid API key"}
-        return {"status": "error", "connected": False, "message": str(e)}
+            result = {"status": "error", "connected": False, "message": "Invalid API key"}
+        else:
+            result = {"status": "error", "connected": False, "message": str(e)}
     except Exception as e:
-        return {"status": "error", "connected": False, "message": str(e)}
+        result = {"status": "error", "connected": False, "message": str(e)}
+
+    _status_cache["data"] = result
+    _status_cache["expires_at"] = now + STATUS_CACHE_TTL
+    return result
 
 
 @router.get("/flows", summary="List all flows",

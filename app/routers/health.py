@@ -122,11 +122,38 @@ def deep_health(db: Session = Depends(get_db)):
         report["checks"]["shopify_token"] = {"status": "error", "message": str(e)}
 
     # ─── Klaviyo ───
-    klaviyo_key = os.environ.get("KLAVIYO_API_KEY", "")
-    report["checks"]["klaviyo"] = {
-        "status": "ok" if klaviyo_key else "not_configured",
-        "configured": bool(klaviyo_key),
-    }
+    try:
+        from app.services.klaviyo_service import _get_klaviyo_key, _klaviyo_diag
+        klaviyo_key = _get_klaviyo_key()
+        if not klaviyo_key:
+            report["checks"]["klaviyo"] = {
+                "status": "disconnected",
+                "configured": False,
+                "message": "No API key in env or DB",
+            }
+            issues.append("klaviyo_disconnected")
+        else:
+            # Check last error to determine connected vs invalid_key
+            last_err = _klaviyo_diag.get("last_error_msg", "")
+            last_success = _klaviyo_diag.get("last_success_ts")
+            if "401" in last_err and not last_success:
+                kl_status = "invalid_key"
+                issues.append("klaviyo_invalid_key")
+            elif last_success:
+                kl_status = "connected"
+            else:
+                kl_status = "configured"
+            report["checks"]["klaviyo"] = {
+                "status": kl_status,
+                "configured": True,
+                "key_source": _klaviyo_diag.get("last_key_source", "unknown"),
+            }
+    except Exception:
+        klaviyo_key = os.environ.get("KLAVIYO_API_KEY", "")
+        report["checks"]["klaviyo"] = {
+            "status": "ok" if klaviyo_key else "not_configured",
+            "configured": bool(klaviyo_key),
+        }
 
     # ─── Scheduler Heartbeat ───
     try:
@@ -206,6 +233,18 @@ def deep_health(db: Session = Depends(get_db)):
         report["issues"] = issues
 
     return report
+
+
+@router.get("/scheduler", summary="Scheduler health",
+            description="Report scheduler job status, last run times, and failure counts")
+def scheduler_health():
+    """Return scheduler job tracking data."""
+    try:
+        from scheduler import get_scheduler_health
+        data = get_scheduler_health()
+        return {"status": data["status"], **data}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 @router.get("/reset-db", summary="Reset stuck DB transactions",

@@ -125,12 +125,69 @@ def create_campaigns(db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/optimize", summary="Run Optimization",
-             description="Run optimization on all active campaigns")
+             description="Run optimization on all active campaigns. Generates recommendations when pre-revenue.")
 def run_optimization(db: Session = Depends(get_db)) -> dict:
     optimizer = CampaignOptimizer(db)
     try:
         results = optimizer.optimize_all()
-        return {"status": "success", "optimizations": results}
+
+        # Pre-revenue recommendation engine
+        recommendations = []
+        total_conversions = db.query(func.sum(CampaignModel.conversions)).scalar() or 0
+        total_spend = db.query(func.sum(CampaignModel.spend)).scalar() or 0
+        total_revenue = db.query(func.sum(CampaignModel.revenue)).scalar() or 0
+
+        if total_conversions == 0 and total_spend >= 50:
+            # Generate structured recommendations
+            active_campaigns = db.query(CampaignModel).filter(
+                CampaignModel.status.in_(["active", "ACTIVE"])
+            ).all()
+            recs = []
+            for c in active_campaigns:
+                c_spend = c.spend or 0
+                c_clicks = c.clicks or 0
+                c_cpc = round(c_spend / c_clicks, 2) if c_clicks > 0 else 0
+                c_ctr = round((c_clicks / c.impressions * 100) if c.impressions and c.impressions > 0 else 0, 2)
+
+                if c_cpc > 1.00:
+                    recs.append(f"Campaign '{c.name}': CPC ${c_cpc} too high — consider pausing or narrowing audience")
+                if c_ctr < 1.0 and (c.impressions or 0) > 500:
+                    recs.append(f"Campaign '{c.name}': CTR {c_ctr}% too low — refresh ad creative")
+                if c_clicks > 50 and total_conversions == 0:
+                    recs.append(f"Campaign '{c.name}': {c_clicks} clicks, 0 sales — check landing page and checkout flow")
+
+            if not recs:
+                recs.append(f"${total_spend:.0f} spent with 0 conversions — review landing page, pixel firing, and checkout UX")
+
+            rec_text = "; ".join(recs)
+            db.add(ActivityLogModel(
+                action="OPTIMIZER_RECOMMENDATION",
+                entity_type="optimizer",
+                details=rec_text[:2000],
+            ))
+            db.commit()
+            recommendations = recs
+
+        # First revenue detection
+        if total_revenue > 0:
+            prev_rev_log = db.query(ActivityLogModel).filter(
+                ActivityLogModel.action == "FIRST_REVENUE_DETECTED"
+            ).first()
+            if not prev_rev_log:
+                db.add(ActivityLogModel(
+                    action="FIRST_REVENUE_DETECTED",
+                    entity_type="system",
+                    details=f"First revenue detected! ${total_revenue:.2f} total. "
+                            f"Recommend setting min_roas_threshold to 1.5 via PUT /api/v1/settings/",
+                ))
+                db.commit()
+                recommendations.append(f"First revenue! ${total_revenue:.2f} — set min_roas_threshold to 1.5")
+
+        return {
+            "status": "success",
+            "optimizations": results,
+            "recommendations": recommendations if recommendations else None,
+        }
     except Exception as e:
         logger.error(f"Optimization failed: {e}")
         return {"status": "error", "message": str(e)}
@@ -238,6 +295,40 @@ def get_activity_log(
             for log in logs
         ],
     }
+
+
+@router.get("/recommendations", summary="Get optimizer recommendations",
+            description="Return last 10 optimizer recommendations from activity log")
+def get_recommendations(db: Session = Depends(get_db)) -> dict:
+    logs = db.query(ActivityLogModel).filter(
+        ActivityLogModel.action.in_(["OPTIMIZER_RECOMMENDATION", "FIRST_REVENUE_DETECTED"])
+    ).order_by(ActivityLogModel.timestamp.desc()).limit(10).all()
+    return {
+        "status": "ok",
+        "count": len(logs),
+        "recommendations": [
+            {
+                "id": log.id,
+                "action": log.action,
+                "details": log.details,
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+            }
+            for log in logs
+        ],
+    }
+
+
+@router.post("/force-sync", summary="Force performance sync",
+             description="Run performance sync immediately with verbose JSON output")
+def force_sync(db: Session = Depends(get_db)) -> dict:
+    """Trigger an immediate performance sync via scheduler force_sync_performance."""
+    try:
+        from scheduler import force_sync_performance
+        result = force_sync_performance()
+        return result
+    except Exception as e:
+        logger.error(f"Force sync failed: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 def _check_safety_limits(db: Session) -> dict:

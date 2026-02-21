@@ -166,6 +166,25 @@ class CampaignHistoryModel(Base):
     cpc = Column(Float, default=0.0)
 
 
+class PerformanceSnapshotModel(Base):
+    __tablename__ = "performance_snapshots"
+    __table_args__ = (
+        UniqueConstraint("date", "campaign_id", name="uq_snapshot_date_campaign"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(Date, nullable=False, index=True)
+    platform = Column(String, nullable=True)
+    campaign_id = Column(Integer, nullable=False, index=True)
+    spend = Column(Float, default=0.0)
+    clicks = Column(Integer, default=0)
+    impressions = Column(Integer, default=0)
+    ctr = Column(Float, default=0.0)
+    cpc = Column(Float, default=0.0)
+    conversions = Column(Integer, default=0)
+    revenue = Column(Float, default=0.0)
+
+
 class TikTokTokenModel(Base):
     __tablename__ = "tiktok_tokens"
 

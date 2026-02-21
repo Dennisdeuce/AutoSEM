@@ -146,6 +146,47 @@ body { background:var(--bg); color:var(--text); font-family:'Space Grotesk',sans
     <tbody id="optimizerRows"><tr><td colspan="4" class="loading">Loading optimizer actions</td></tr></tbody>
   </table>
 
+  <!-- Revenue Pipeline Funnel -->
+  <div style="font-size:15px;font-weight:600;margin:20px 0 12px;color:var(--dim)">Revenue Pipeline</div>
+  <div id="funnelSection" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:20px">
+    <div id="funnelLoading" class="loading">Loading funnel data</div>
+    <div id="funnelContent" style="display:none">
+      <div style="display:flex;gap:8px;align-items:stretch;flex-wrap:wrap;margin-bottom:14px">
+        <div style="flex:1;min-width:120px;text-align:center;padding:12px;background:var(--surface2);border-radius:10px">
+          <div style="font-size:11px;color:var(--dim);text-transform:uppercase;margin-bottom:4px">Impressions</div>
+          <div style="font-family:'IBM Plex Mono';font-size:22px;font-weight:700;color:var(--blue)" id="fn-impressions">—</div>
+        </div>
+        <div style="display:flex;align-items:center;color:var(--dim);font-size:18px">→</div>
+        <div style="flex:1;min-width:120px;text-align:center;padding:12px;background:var(--surface2);border-radius:10px">
+          <div style="font-size:11px;color:var(--dim);text-transform:uppercase;margin-bottom:4px">Clicks</div>
+          <div style="font-family:'IBM Plex Mono';font-size:22px;font-weight:700;color:var(--green)" id="fn-clicks">—</div>
+          <div style="font-size:10px;color:var(--dim)" id="fn-ctr">—</div>
+        </div>
+        <div style="display:flex;align-items:center;color:var(--dim);font-size:18px">→</div>
+        <div style="flex:1;min-width:120px;text-align:center;padding:12px;background:var(--surface2);border-radius:10px">
+          <div style="font-size:11px;color:var(--dim);text-transform:uppercase;margin-bottom:4px">Page Views</div>
+          <div style="font-family:'IBM Plex Mono';font-size:22px;font-weight:700" id="fn-lpv">—</div>
+          <div style="font-size:10px;color:var(--dim)" id="fn-lpv-rate">—</div>
+        </div>
+        <div style="display:flex;align-items:center;color:var(--dim);font-size:18px">→</div>
+        <div style="flex:1;min-width:120px;text-align:center;padding:12px;background:var(--surface2);border-radius:10px">
+          <div style="font-size:11px;color:var(--dim);text-transform:uppercase;margin-bottom:4px">Purchases</div>
+          <div style="font-family:'IBM Plex Mono';font-size:22px;font-weight:700" id="fn-purchases">—</div>
+          <div style="font-size:10px;color:var(--dim)" id="fn-conv-rate">—</div>
+        </div>
+        <div style="display:flex;align-items:center;color:var(--dim);font-size:18px">→</div>
+        <div style="flex:1;min-width:120px;text-align:center;padding:12px;background:var(--surface2);border-radius:10px">
+          <div style="font-size:11px;color:var(--dim);text-transform:uppercase;margin-bottom:4px">Revenue</div>
+          <div style="font-family:'IBM Plex Mono';font-size:22px;font-weight:700;color:var(--green)" id="fn-revenue">—</div>
+        </div>
+      </div>
+      <div id="funnelWarning" style="display:none;background:var(--amber-bg);border:1px solid rgba(210,153,34,0.3);border-radius:10px;padding:14px 18px">
+        <div style="font-weight:600;color:var(--amber);margin-bottom:8px" id="funnelWarningMsg"></div>
+        <ul id="funnelChecklist" style="margin:0;padding-left:20px;font-size:13px;color:var(--text);line-height:2"></ul>
+      </div>
+    </div>
+  </div>
+
   <div style="font-size:15px;font-weight:600;margin:20px 0 12px;color:var(--dim)">Optimization Progress</div>
   <div id="overviewProgress">
     <div class="prog"><div class="prog-lbl">Overall</div><div class="prog-track"><div class="prog-fill" id="prog-overall" style="width:0%;background:rgba(63,185,80,0.6)"></div></div></div>
@@ -947,9 +988,48 @@ async function runSyncPerformance() {
   }
 }
 
+// ─── Funnel ───
+async function loadFunnel() {
+  try {
+    const resp = await fetch(API + '/dashboard/funnel');
+    const data = await resp.json();
+    if (data.status !== 'ok') return;
+    const f = data.funnel || {};
+    $('funnelLoading').style.display = 'none';
+    $('funnelContent').style.display = 'block';
+    $('fn-impressions').textContent = fmtK(f.impressions);
+    $('fn-clicks').textContent = f.clicks || 0;
+    $('fn-ctr').textContent = f.ctr + '% CTR';
+    $('fn-lpv').textContent = f.landing_page_views || 0;
+    $('fn-lpv-rate').textContent = (data.dropoff||{}).click_to_landing_page + '% of clicks';
+    $('fn-purchases').textContent = f.purchases || 0;
+    $('fn-purchases').className = f.purchases > 0 ? 'g' : 'r';
+    $('fn-purchases').style.fontFamily = "'IBM Plex Mono'";
+    $('fn-purchases').style.fontSize = '22px';
+    $('fn-purchases').style.fontWeight = '700';
+    $('fn-purchases').style.color = f.purchases > 0 ? 'var(--green)' : 'var(--red)';
+    $('fn-conv-rate').textContent = (data.dropoff||{}).click_to_purchase + '% conv';
+    $('fn-revenue').textContent = '$' + fmt(f.revenue);
+    $('fn-revenue').style.color = f.revenue > 0 ? 'var(--green)' : 'var(--red)';
+
+    // Warnings
+    const warnings = data.warnings || [];
+    if (warnings.length > 0) {
+      const w = warnings[0];
+      $('funnelWarning').style.display = 'block';
+      $('funnelWarningMsg').textContent = w.message;
+      let clHtml = '';
+      (w.checklist || []).forEach(item => { clHtml += '<li>' + item + '</li>'; });
+      $('funnelChecklist').innerHTML = clHtml;
+    }
+  } catch(e) {
+    $('funnelLoading').textContent = 'Funnel data unavailable';
+  }
+}
+
 // ─── Init ───
 async function refreshAll() {
-  await Promise.all([loadHealth(), loadMeta(), loadShopify(), loadKlaviyo(), loadDeepHealth(), loadAutomationStatus(), loadActivityLog(), loadShopifyScopes(), loadOptimizerActions()]);
+  await Promise.all([loadHealth(), loadMeta(), loadShopify(), loadKlaviyo(), loadDeepHealth(), loadAutomationStatus(), loadActivityLog(), loadShopifyScopes(), loadOptimizerActions(), loadFunnel()]);
   updateTime();
 }
 

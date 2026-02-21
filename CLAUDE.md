@@ -9,9 +9,9 @@ AutoSEM is an autonomous advertising platform built with FastAPI. It manages mul
 **Store:** https://court-sportswear.com
 **Repo:** https://github.com/Dennisdeuce/AutoSEM (branch: main)
 
-## Current Version: 2.4.0
+## Current Version: 2.5.0
 
-13 routers, 90+ endpoints. Production smoke-tested: 51/54 pass. AI ad copy generation via Claude API (POST /campaigns/generate). Scheduler: midnight CST daily optimization (cron), hourly spend checks, heartbeat ticks. Optimizer awareness-mode fix (won't auto-pause pre-revenue campaigns). Ad-level CRUD fully deployed.
+14 routers, 100+ endpoints. Production smoke-tested: 51/54 pass. AI ad copy generation via Claude API (POST /campaigns/generate). Scheduler: midnight CST daily optimization (cron), hourly spend checks, daily performance snapshots, heartbeat ticks. Optimizer awareness-mode fix (won't auto-pause pre-revenue campaigns). Ad-level CRUD fully deployed. Klaviyo hardcoded key removed (BUG-11 fixed). Store health monitor. Conversion funnel tracking. Pre-revenue optimizer recommendations.
 
 ## Commands
 
@@ -35,11 +35,11 @@ No test framework configured. Use Swagger UI or curl for testing.
 
 ## Architecture
 
-**FastAPI** app (`main.py`) with 13 routers under `/api/v1/`:
+**FastAPI** app (`main.py`) with 14 routers under `/api/v1/`:
 
 | Router | Prefix | Purpose |
 |--------|--------|---------|
-| `dashboard` | `/dashboard` | Aggregated metrics, sync-meta, optimize-now, activity log, emergency controls |
+| `dashboard` | `/dashboard` | Aggregated metrics, sync-meta, optimize-now, activity log, emergency controls, funnel, trends |
 | `meta` | `/meta` | OAuth, campaigns, activate/pause/set-budget (CBO), ad creative CRUD, full-structure query, ad-level update/pause |
 | `tiktok` | `/tiktok` | TikTok OAuth, campaign launch, video generation, targeting |
 | `campaigns` | `/campaigns` | CRUD, /active, DELETE /cleanup, POST /generate (AI ad copy via Claude API) |
@@ -48,18 +48,20 @@ No test framework configured. Use Swagger UI or curl for testing.
 | `deploy` | `/deploy` | GitHub webhook + deploy/pull with auto-restart |
 | `shopify` | `/shopify` | Admin API, webhooks, token refresh, customers, discounts |
 | `google_ads` | `/google` | Google Ads campaigns (returns not_configured when no credentials) |
-| `klaviyo` | `/klaviyo` | Klaviyo flows, abandoned cart, email marketing, POST /set-key, auto-init from env |
-| `health` | `/health` | Deep health check, GET /reset-db for error recovery |
+| `klaviyo` | `/klaviyo` | Klaviyo flows, abandoned cart, email marketing, POST /set-key, /validate-key, /diagnose, auto-init from env |
+| `health` | `/health` | Deep health check, GET /reset-db for error recovery, GET /scheduler for job status |
 | `seo` | `/seo` | JSON-LD structured data, XML sitemap generation |
-| `automation` | `/automation` | Status, start/stop, run-cycle, create-campaigns, optimize, push-live, activity-log |
+| `automation` | `/automation` | Status, start/stop, run-cycle, create-campaigns, optimize, push-live, activity-log, /recommendations, /force-sync |
+| `store_health` | `/store-health` | Court Sportswear site checks: speed, pixels, CRO elements, SSL |
 
 **Database:** PostgreSQL on Neon (`ep-delicate-queen-ah2ayed9.c-3.us-east-1.aws.neon.tech/neondb`)
-Tables: products, campaigns, meta_tokens, tiktok_tokens, activity_logs, settings
+Tables: products, campaigns, campaign_history, meta_tokens, tiktok_tokens, activity_logs, settings, performance_snapshots
 
-**Scheduler** (`scheduler.py`): APScheduler runs 6 jobs:
+**Scheduler** (`scheduler.py`): APScheduler runs 7 jobs:
 - Daily optimization at midnight CST (06:00 UTC cron trigger)
 - Optimization every 6 hours (interval, intra-day)
 - Performance sync every 2 hours
+- Daily performance snapshot at 06:15 UTC (after optimization)
 - Hourly spend check (compares active budgets vs daily_spend_limit, alerts at 90%)
 - Scheduler heartbeat tick every hour (proof-of-life logging)
 - Shopify token refresh every 20 hours
@@ -68,17 +70,17 @@ Tables: products, campaigns, meta_tokens, tiktok_tokens, activity_logs, settings
 
 | DB ID | Platform ID | Name | Budget | Status | Performance |
 |-------|------------|------|--------|--------|-------------|
-| 114 | 120206746647300364 | Ongoing website promotion | **$20/day** | **ACTIVE** | $0.11 CPC, 4.83% CTR ⭐ |
+| 114 | 120206746647300364 | Ongoing website promotion | **$20/day** | **ACTIVE** | $0.11 CPC, 4.83% CTR |
 | 115 | 120241759616260364 | Court Sportswear - Sales | $5/day | **PAUSED** | $0.73 CPC — stopped |
 
 ### Ad-Level Status (Ongoing Campaign)
 | Ad ID | Creative | Destination URL | Status |
 |-------|----------|-----------------|--------|
-| 120206746647430364 | Tennis TShirts image 1 | `/collections/all-mens-t-shirts` | ✅ ACTIVE |
-| 120206746647460364 | Tennis TShirts image 2 | `/collections/all-mens-t-shirts` | ✅ ACTIVE |
-| 120206746647450364 | Dynamic catalog ad | Dynamic | ✅ ACTIVE |
-| 120206746647410364 | Tennis TShirts (old) | `http://www.court-sportswear.com/` | ⏸️ PAUSED |
-| 120206746647440364 | Tennis TShirts (old) | `http://www.court-sportswear.com/` | ⏸️ PAUSED |
+| 120206746647430364 | Tennis TShirts image 1 | `/collections/all-mens-t-shirts` | ACTIVE |
+| 120206746647460364 | Tennis TShirts image 2 | `/collections/all-mens-t-shirts` | ACTIVE |
+| 120206746647450364 | Dynamic catalog ad | Dynamic | ACTIVE |
+| 120206746647410364 | Tennis TShirts (old) | `http://www.court-sportswear.com/` | PAUSED |
+| 120206746647440364 | Tennis TShirts (old) | `http://www.court-sportswear.com/` | PAUSED |
 
 **Key change Feb 20:** Paused 2 ads still pointing to homepage. All active ads now deep-link to collection page. This was only possible via ad-level API endpoints (GET /meta/campaigns/{id}/full-structure, PUT /meta/ads/{id}/update).
 
@@ -97,20 +99,20 @@ All 19 TikTok campaigns DISABLED. Total spend: $11.11. Audience targeting catast
 ### Auto-Action Rules
 | Rule | Condition | Action | Respects awareness mode? |
 |------|-----------|--------|--------------------------|
-| pause_underperformer | ROAS < threshold/3 after $20+ spend | Pause campaign | ✅ Yes — skipped when threshold=0 |
+| pause_underperformer | ROAS < threshold/3 after $20+ spend | Pause campaign | Yes — skipped when threshold=0 |
 | flag_landing_page_pause | CTR>3%, conv<1%, CPC>$1.00 | Pause campaign | No — always active |
 | flag_landing_page_budget_cut | CTR>3%, conv<1%, CPC>$0.50 | Cut budget 25% | No — always active |
 | scale_winner | CTR>3%, CPC<$0.20, 10+ clicks | Increase budget 20% (cap $25) | No — always active |
-| budget_increase | ROAS > 1.5x threshold | Increase budget 25% | ✅ Yes — skipped when threshold=0 |
-| budget_decrease | ROAS < threshold, $50+ spend | Decrease budget 25% | ✅ Yes — skipped when threshold=0 |
+| budget_increase | ROAS > 1.5x threshold | Increase budget 25% | Yes — skipped when threshold=0 |
+| budget_decrease | ROAS < threshold, $50+ spend | Decrease budget 25% | Yes — skipped when threshold=0 |
 | emergency_pause | Net loss > $500 | Pause ALL campaigns | No — always active |
 
-### ⚠️ BUG-10 FIX (Feb 20): Optimizer used hardcoded ROAS < 0.5 check
-The optimizer had a hardcoded `roas < 0.5` pause rule that ignored the `min_roas_threshold` setting. This caused it to auto-pause the Ongoing campaign (which had 0 ROAS because no sales yet, despite excellent $0.11 CPC). Fixed to respect settings — when threshold is 0, ROAS-based pauses are completely skipped.
+### BUG-10 FIX (Feb 20): Optimizer used hardcoded ROAS < 0.5 check
+The optimizer had a hardcoded `roas < 0.5` pause rule that ignored the `min_roas_threshold` setting. Fixed to respect settings — when threshold is 0, ROAS-based pauses are completely skipped.
 
 ## Court Sportswear CRO Status (Feb 20, 2026)
 
-### ✅ Completed
+### Completed
 - Free shipping announcement bar (links to /collections/all-mens-t-shirts)
 - Judge.me reviews installed on all product pages
 - Meta ad destination URLs changed to collection page (deep-link)
@@ -120,12 +122,12 @@ The optimizer had a hardcoded `roas < 0.5` pause rule that ignored the `min_roas
 - Meta Pixel, TikTok Pixel, GA4, GTM all active
 - Cookie consent with Google Consent Mode v2
 
-### ✅ Klaviyo
+### Klaviyo
 - Abandoned cart flow: **LIVE** (flow VFSVJd, 1 email live, 1 draft)
 - 2 profiles collected (dennisdeuce@gmail.com, julierpenn3@gmail.com)
 - 44 Shopify customers total, 29 with orders, $2,229.50 lifetime revenue
 
-### ❌ Still Missing
+### Still Missing
 - **Email capture popup on store** — no Klaviyo form/popup installed on court-sportswear.com
 - **Abandoned cart email #2** — still in draft status in Klaviyo
 - **Google Ads** — router exists but no credentials configured
@@ -139,8 +141,14 @@ curl https://auto-sem.replit.app/health
 # Sync latest Meta performance data
 curl -X POST https://auto-sem.replit.app/api/v1/automation/sync-performance
 
+# Force sync with verbose output
+curl -X POST https://auto-sem.replit.app/api/v1/automation/force-sync
+
 # Run optimization (respects awareness mode)
 curl -X POST https://auto-sem.replit.app/api/v1/automation/optimize
+
+# Get optimizer recommendations
+curl https://auto-sem.replit.app/api/v1/automation/recommendations
 
 # Get full campaign structure (campaign → adsets → ads)
 curl https://auto-sem.replit.app/api/v1/meta/campaigns/120206746647300364/full-structure
@@ -159,12 +167,27 @@ curl -X PUT https://auto-sem.replit.app/api/v1/settings/ \
 # Get Shopify products
 curl https://auto-sem.replit.app/api/v1/shopify/products
 
-# Update product tags
-curl -X PUT https://auto-sem.replit.app/api/v1/shopify/products/{product_id} \
-  -H "Content-Type: application/json" -d '{"tags": "new,tags,here"}'
+# Validate a new Klaviyo key
+curl -X POST https://auto-sem.replit.app/api/v1/klaviyo/validate-key \
+  -H "Content-Type: application/json" -d '{"api_key": "pk_your_new_key"}'
 
-# Check Klaviyo status
-curl https://auto-sem.replit.app/api/v1/klaviyo/flows/VFSVJd
+# Diagnose Klaviyo key issues
+curl https://auto-sem.replit.app/api/v1/klaviyo/diagnose
+
+# Check scheduler health
+curl https://auto-sem.replit.app/api/v1/health/scheduler
+
+# Store health check
+curl https://auto-sem.replit.app/api/v1/store-health/check
+
+# Conversion funnel
+curl https://auto-sem.replit.app/api/v1/dashboard/funnel
+
+# Performance trends (last 30 days)
+curl https://auto-sem.replit.app/api/v1/dashboard/trends?days=30
+
+# Per-campaign trends
+curl https://auto-sem.replit.app/api/v1/dashboard/trends/114?days=30
 ```
 
 ## Deploy Flow
@@ -206,16 +229,17 @@ curl -X POST https://auto-sem.replit.app/api/v1/deploy/pull \
 
 | Bug | Status | Fix |
 |-----|--------|-----|
-| BUG-1: Scheduler optimizer missing DB session | ✅ Fixed v1.8.0 | |
-| BUG-2: Klaviyo env var not loading | ✅ Fixed v2.0.0 | Auto-init from env |
-| BUG-3: Shopify scopes insufficient | ✅ Fixed v1.9.0 | App reinstalled |
-| BUG-4: Deploy auto-restart | ✅ Fixed v1.8.0 | os._exit(0) |
-| BUG-5: Optimizer data pipeline | ✅ Fixed v2.0.0 | PerformanceSyncService |
-| BUG-6: Optimizer CBO budget | ✅ Fixed v1.10.0 | Campaign-first, adset fallback |
-| BUG-7: Automation router missing Query import | ✅ Fixed v2.3.0 | Added import |
-| BUG-8: Shopify 500 on invalid product ID | ✅ Fixed v2.3.0 | Try/except |
-| BUG-9: Shopify 500 on invalid collection ID | ✅ Fixed v2.3.0 | Try/except |
-| BUG-10: Optimizer ignores min_roas_threshold=0 | ✅ Fixed v2.4.0 | Awareness mode |
+| BUG-1: Scheduler optimizer missing DB session | Fixed v1.8.0 | |
+| BUG-2: Klaviyo env var not loading | Fixed v2.0.0 | Auto-init from env |
+| BUG-3: Shopify scopes insufficient | Fixed v1.9.0 | App reinstalled |
+| BUG-4: Deploy auto-restart | Fixed v1.8.0 | os._exit(0) |
+| BUG-5: Optimizer data pipeline | Fixed v2.0.0 | PerformanceSyncService |
+| BUG-6: Optimizer CBO budget | Fixed v1.10.0 | Campaign-first, adset fallback |
+| BUG-7: Automation router missing Query import | Fixed v2.3.0 | Added import |
+| BUG-8: Shopify 500 on invalid product ID | Fixed v2.3.0 | Try/except |
+| BUG-9: Shopify 500 on invalid collection ID | Fixed v2.3.0 | Try/except |
+| BUG-10: Optimizer ignores min_roas_threshold=0 | Fixed v2.4.0 | Awareness mode |
+| BUG-11: Klaviyo hardcoded fallback key rotted | Fixed v2.5.0 | Removed hardcoded key, env/DB only + /validate-key |
 
 ## Phase History
 
@@ -230,3 +254,4 @@ curl -X POST https://auto-sem.replit.app/api/v1/deploy/pull \
 - **Phase 10C:** NotificationService, Klaviyo fallback key
 - **Phase 11:** Production smoke test (51/54), scheduler upgrade (6 jobs), AI ad copy generation
 - **Phase 12 (Feb 20):** Ad-level optimization — paused homepage-pointing ads, deep-linked active ads to collection page. Optimizer awareness-mode fix. Sales campaign paused ($0.73 CPC waste stopped). 23/23 product tags optimized. (v2.4.0)
+- **Phase 13 (Feb 21):** Revenue pipeline fix — Klaviyo hardcoded key removed (BUG-11), validate-key/diagnose endpoints, retry logic with exponential backoff, scheduler resilience (3 retries per job, job tracking, /health/scheduler), store health monitor (7-point check on court-sportswear.com), conversion funnel tracking (/dashboard/funnel with drop-off warnings), pre-revenue optimizer recommendations, daily performance snapshots (PerformanceSnapshotModel + /dashboard/trends), force-sync endpoint. 14 routers, 100+ endpoints. (v2.5.0)

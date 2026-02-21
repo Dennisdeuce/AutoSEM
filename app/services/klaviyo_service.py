@@ -5,6 +5,7 @@ Generates Shopify discount codes for the 48-hour email via Shopify Admin API.
 """
 
 import os
+import time
 import logging
 from typing import Dict, List, Optional
 
@@ -12,7 +13,6 @@ import requests
 
 logger = logging.getLogger("autosem.klaviyo_service")
 
-KLAVIYO_API_KEY = os.environ.get("KLAVIYO_API_KEY", "")
 KLAVIYO_BASE_URL = "https://a.klaviyo.com/api"
 KLAVIYO_REVISION = "2024-10-15"
 
@@ -21,11 +21,21 @@ SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "4448da-3.myshopify.com")
 SHOPIFY_CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID", "")
 SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
 
+# Module-level tracking for diagnostics
+_klaviyo_diag = {
+    "last_success_ts": None,
+    "last_error_msg": None,
+    "last_key_source": None,
+}
+
 
 def _get_klaviyo_key() -> str:
-    """Get Klaviyo API key from env var, falling back to SettingsModel in DB."""
+    """Get Klaviyo API key from env var, falling back to SettingsModel in DB.
+    No hardcoded keys — must come from env or DB only.
+    """
     key = os.environ.get("KLAVIYO_API_KEY", "")
     if key:
+        _klaviyo_diag["last_key_source"] = "env"
         return key
 
     try:
@@ -34,12 +44,14 @@ def _get_klaviyo_key() -> str:
         try:
             row = db.query(SettingsModel).filter(SettingsModel.key == "klaviyo_api_key").first()
             if row and row.value:
+                _klaviyo_diag["last_key_source"] = "db"
                 return row.value
         finally:
             db.close()
     except Exception as e:
         logger.warning(f"Failed to read klaviyo_api_key from DB: {e}")
 
+    _klaviyo_diag["last_key_source"] = "none"
     return ""
 
 
@@ -91,30 +103,35 @@ class KlaviyoService:
         }
 
     def _request(self, method: str, path: str, payload: dict = None) -> Dict:
-        """Make an authenticated Klaviyo API request."""
+        """Make an authenticated Klaviyo API request with retry + exponential backoff."""
         url = f"{KLAVIYO_BASE_URL}/{path.lstrip('/')}"
-        resp = requests.request(
-            method, url,
-            headers=self._headers(),
-            json=payload,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
+        last_exc = None
+        for attempt in range(3):
+            try:
+                resp = requests.request(
+                    method, url,
+                    headers=self._headers(),
+                    json=payload,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                _klaviyo_diag["last_success_ts"] = time.time()
+                return resp.json() if resp.content else {}
+            except Exception as e:
+                last_exc = e
+                _klaviyo_diag["last_error_msg"] = str(e)
+                if attempt < 2:
+                    wait = 2 ** attempt  # 1s, 2s
+                    time.sleep(wait)
+        raise last_exc
 
     # ─── Core Methods ────────────────────────────────────────────
 
     def create_abandoned_cart_flow(self) -> Dict:
-        """Create the full 3-email abandoned cart flow in Klaviyo.
-
-        1. Creates a flow triggered by 'Checkout Started' metric
-        2. Adds 3 email actions with time delays
-        3. Generates a Shopify discount code for the 48-hour email
-        """
+        """Create the full 3-email abandoned cart flow in Klaviyo."""
         if not self.is_configured:
             return {"success": False, "error": "KLAVIYO_API_KEY not set"}
 
-        # Step 1: Create the flow
         flow_payload = {
             "data": {
                 "type": "flow",
@@ -131,17 +148,14 @@ class KlaviyoService:
         if not flow_id:
             return {"success": False, "error": "Flow creation returned no ID"}
 
-        # Step 2: Generate Shopify discount code for email 3
         discount_code = self._create_shopify_discount()
 
-        # Step 3: Create the 3 email actions
         actions_created = []
         for i, email in enumerate(self.ABANDONED_CART_EMAILS):
             settings = {
                 "subject": email["subject"],
                 "preview_text": email["preview_text"],
             }
-            # Inject discount code into email 3 settings
             if i == 2 and discount_code:
                 settings["discount_code"] = discount_code
 
@@ -197,10 +211,7 @@ class KlaviyoService:
 
     def trigger_flow(self, event_name: str, email: str,
                      properties: Optional[Dict] = None) -> Dict:
-        """Send a custom event to Klaviyo to trigger a flow.
-
-        Common events: 'Checkout Started', 'Added to Cart', 'Order Placed'
-        """
+        """Send a custom event to Klaviyo to trigger a flow."""
         if not self.is_configured:
             return {"success": False, "error": "KLAVIYO_API_KEY not set"}
 
@@ -237,15 +248,12 @@ class KlaviyoService:
         if not self.is_configured:
             return {"success": False, "error": "KLAVIYO_API_KEY not set"}
 
-        # Get all flows
         flows_resp = self._request("GET", "/flows/")
         flows = flows_resp.get("data", [])
 
-        # Get email-related metrics
         metrics_resp = self._request("GET", "/metrics/")
         metrics = metrics_resp.get("data", [])
 
-        # Summarize
         email_metrics = [
             m for m in metrics
             if "email" in (m.get("attributes", {}).get("integration", {}).get("name", "") or "").lower()
@@ -286,7 +294,6 @@ class KlaviyoService:
             return None
 
         try:
-            # Get a fresh Shopify token
             token_resp = requests.post(
                 f"https://{SHOPIFY_STORE}/admin/oauth/access_token",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -303,7 +310,6 @@ class KlaviyoService:
             if not shopify_token:
                 return None
 
-            # Create a price rule for 10% off
             import random
             code = f"COMEBACK10-{random.randint(1000, 9999)}"
 
@@ -339,7 +345,6 @@ class KlaviyoService:
             if not rule_id:
                 return None
 
-            # Create the discount code on the price rule
             code_payload = {
                 "discount_code": {"code": code}
             }

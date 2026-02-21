@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.database import get_db, CampaignModel, ActivityLogModel, MetaTokenModel, TikTokTokenModel
+from app.database import get_db, CampaignModel, ActivityLogModel, MetaTokenModel, TikTokTokenModel, PerformanceSnapshotModel
 
 logger = logging.getLogger("AutoSEM.Dashboard")
 router = APIRouter()
@@ -349,6 +349,140 @@ def sync_performance(db: Session = Depends(get_db)):
         return {"status": "ok", "results": results}
     except Exception as e:
         logger.error(f"Manual performance sync failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/funnel", summary="Conversion funnel data",
+            description="Get full funnel: Meta impressions → clicks → landing page views → Shopify orders/revenue")
+def get_funnel(db: Session = Depends(get_db)):
+    """Return conversion funnel data with drop-off percentages."""
+    try:
+        # Meta ad data
+        meta = _fetch_meta_7d(db)
+        impressions = meta.get("impressions", 0)
+        clicks = meta.get("clicks", 0)
+        spend = meta.get("spend", 0)
+        ctr = round((clicks / impressions * 100) if impressions > 0 else 0, 2)
+        cpc = round((spend / clicks) if clicks > 0 else 0, 2)
+
+        # Shopify order data from campaigns table
+        total_revenue = db.query(func.sum(CampaignModel.revenue)).scalar() or 0
+        total_conversions = db.query(func.sum(CampaignModel.conversions)).scalar() or 0
+
+        # Landing page views estimate (~85% of clicks typically)
+        landing_page_views = int(clicks * 0.85) if clicks > 0 else 0
+
+        # Drop-off calculations
+        click_to_lp = round((landing_page_views / clicks * 100) if clicks > 0 else 0, 1)
+        lp_to_purchase = round((total_conversions / landing_page_views * 100) if landing_page_views > 0 else 0, 2)
+        click_to_purchase = round((total_conversions / clicks * 100) if clicks > 0 else 0, 2)
+
+        # Warning detection
+        warnings = []
+        if total_conversions == 0 and clicks > 100:
+            warnings.append({
+                "type": "zero_conversions_high_clicks",
+                "message": f"{clicks} clicks but 0 purchases — check landing page and checkout flow",
+                "checklist": [
+                    "Verify collection page loads fast (< 3s)",
+                    "Check Meta Pixel is firing on checkout",
+                    "Review pricing vs competitor pricing",
+                    "Test complete checkout flow on mobile",
+                    "Check if cart abandonment emails are active in Klaviyo",
+                    "Verify free shipping messaging is prominent",
+                ],
+            })
+
+        return {
+            "status": "ok",
+            "funnel": {
+                "impressions": impressions,
+                "clicks": clicks,
+                "ctr": ctr,
+                "cpc": cpc,
+                "spend": round(spend, 2),
+                "landing_page_views": landing_page_views,
+                "purchases": int(total_conversions),
+                "revenue": round(float(total_revenue), 2),
+            },
+            "dropoff": {
+                "impression_to_click": ctr,
+                "click_to_landing_page": click_to_lp,
+                "landing_page_to_purchase": lp_to_purchase,
+                "click_to_purchase": click_to_purchase,
+            },
+            "warnings": warnings,
+        }
+    except Exception as e:
+        logger.error(f"Funnel data error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/trends", summary="Daily aggregated performance trends",
+            description="Get daily aggregated metrics from performance snapshots")
+def get_trends(days: int = 30, db: Session = Depends(get_db)):
+    try:
+        from datetime import date
+        from sqlalchemy import cast, Date as SqlDate
+        cutoff = date.today() - timedelta(days=days)
+        rows = db.query(
+            PerformanceSnapshotModel.date,
+            func.sum(PerformanceSnapshotModel.spend).label("spend"),
+            func.sum(PerformanceSnapshotModel.clicks).label("clicks"),
+            func.sum(PerformanceSnapshotModel.impressions).label("impressions"),
+            func.sum(PerformanceSnapshotModel.conversions).label("conversions"),
+            func.sum(PerformanceSnapshotModel.revenue).label("revenue"),
+        ).filter(
+            PerformanceSnapshotModel.date >= cutoff
+        ).group_by(PerformanceSnapshotModel.date).order_by(PerformanceSnapshotModel.date).all()
+
+        data = []
+        for r in rows:
+            clicks = r.clicks or 0
+            impressions = r.impressions or 0
+            spend = r.spend or 0
+            data.append({
+                "date": r.date.isoformat(),
+                "spend": round(float(spend), 2),
+                "clicks": int(clicks),
+                "impressions": int(impressions),
+                "ctr": round((clicks / impressions * 100) if impressions > 0 else 0, 2),
+                "cpc": round((spend / clicks) if clicks > 0 else 0, 2),
+                "conversions": int(r.conversions or 0),
+                "revenue": round(float(r.revenue or 0), 2),
+            })
+        return {"status": "ok", "days": days, "data": data}
+    except Exception as e:
+        logger.error(f"Trends error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/trends/{campaign_id}", summary="Per-campaign performance trends",
+            description="Get daily metrics for a specific campaign")
+def get_campaign_trends(campaign_id: int, days: int = 30, db: Session = Depends(get_db)):
+    try:
+        from datetime import date
+        cutoff = date.today() - timedelta(days=days)
+        rows = db.query(PerformanceSnapshotModel).filter(
+            PerformanceSnapshotModel.campaign_id == campaign_id,
+            PerformanceSnapshotModel.date >= cutoff,
+        ).order_by(PerformanceSnapshotModel.date).all()
+
+        data = []
+        for r in rows:
+            data.append({
+                "date": r.date.isoformat(),
+                "spend": round(float(r.spend or 0), 2),
+                "clicks": int(r.clicks or 0),
+                "impressions": int(r.impressions or 0),
+                "ctr": round(float(r.ctr or 0), 2),
+                "cpc": round(float(r.cpc or 0), 2),
+                "conversions": int(r.conversions or 0),
+                "revenue": round(float(r.revenue or 0), 2),
+            })
+        return {"status": "ok", "campaign_id": campaign_id, "days": days, "data": data}
+    except Exception as e:
+        logger.error(f"Campaign trends error: {e}")
         return {"status": "error", "message": str(e)}
 
 
