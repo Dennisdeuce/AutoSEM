@@ -578,7 +578,8 @@ META_PAGE_ID = os.environ.get("META_PAGE_ID", "177394692123504")
 class CreateAdRequest(BaseModel):
     adset_id: str
     name: str
-    image_url: str
+    image_url: str = ""
+    image_hash: Optional[str] = None
     primary_text: str
     headline: str
     description: str
@@ -606,17 +607,20 @@ def create_ad(req: CreateAdRequest, db: Session = Depends(get_db)):
 
     try:
         # Step 1: Create AdCreative
+        link_data = {
+            "link": req.link,
+            "message": req.primary_text,
+            "name": req.headline,
+            "description": req.description,
+            "call_to_action": {"type": req.cta, "value": {"link": req.link}},
+        }
+        if req.image_hash:
+            link_data["image_hash"] = req.image_hash
+        elif req.image_url:
+            link_data["picture"] = req.image_url
         object_story_spec = json.dumps({
             "page_id": page_id,
-            "link_data": {
-                "image_hash": "",
-                "picture": req.image_url,
-                "link": req.link,
-                "message": req.primary_text,
-                "name": req.headline,
-                "description": req.description,
-                "call_to_action": {"type": req.cta, "value": {"link": req.link}},
-            },
+            "link_data": link_data,
         })
 
         creative_resp = requests.post(
