@@ -3,7 +3,7 @@
 import os
 import logging
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Text, DateTime, text
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Text, DateTime, Date, UniqueConstraint, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -145,6 +145,25 @@ class MetaTokenModel(Base):
     ad_account_id = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CampaignHistoryModel(Base):
+    __tablename__ = "campaign_history"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "date", name="uq_campaign_history_campaign_date"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, nullable=False, index=True)
+    date = Column(Date, nullable=False)
+    impressions = Column(Integer, default=0)
+    clicks = Column(Integer, default=0)
+    spend = Column(Float, default=0.0)
+    conversions = Column(Integer, default=0)
+    revenue = Column(Float, default=0.0)
+    roas = Column(Float, default=0.0)
+    ctr = Column(Float, default=0.0)
+    cpc = Column(Float, default=0.0)
 
 
 class TikTokTokenModel(Base):

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Dict, List
 from sqlalchemy.orm import Session
 
-from app.database import CampaignModel, ActivityLogModel, MetaTokenModel
+from app.database import CampaignModel, CampaignHistoryModel, ActivityLogModel, MetaTokenModel
 from app.services.meta_ads import MetaAdsService
 
 logger = logging.getLogger("autosem.performance_sync")
@@ -140,6 +140,10 @@ class PerformanceSyncService:
                     synced += 1
 
             self.db.commit()
+
+            # Save daily snapshots for trend tracking
+            self._save_daily_snapshots()
+
             return {
                 "status": "ok",
                 "campaigns_synced": synced,
@@ -205,6 +209,59 @@ class PerformanceSyncService:
             campaign.roas = campaign.total_revenue / campaign.total_spend
         self.db.add(campaign)
         logger.info(f"Created local record for {platform} campaign: {name} ({platform_campaign_id})")
+
+    def _save_daily_snapshots(self):
+        """Upsert a CampaignHistoryModel row for each active campaign for today."""
+        today = datetime.now(timezone.utc).date()
+        try:
+            campaigns = self.db.query(CampaignModel).filter(
+                CampaignModel.platform == "meta",
+                CampaignModel.platform_campaign_id != None,
+            ).all()
+
+            saved = 0
+            for c in campaigns:
+                impressions = c.impressions or 0
+                clicks = c.clicks or 0
+                spend = c.spend or 0.0
+                ctr = round((clicks / impressions * 100), 2) if impressions > 0 else 0.0
+                cpc = round(spend / clicks, 2) if clicks > 0 else 0.0
+                roas = round((c.revenue or 0) / spend, 2) if spend > 0 else 0.0
+
+                existing = self.db.query(CampaignHistoryModel).filter(
+                    CampaignHistoryModel.campaign_id == c.id,
+                    CampaignHistoryModel.date == today,
+                ).first()
+
+                if existing:
+                    existing.impressions = impressions
+                    existing.clicks = clicks
+                    existing.spend = spend
+                    existing.conversions = c.conversions or 0
+                    existing.revenue = c.revenue or 0.0
+                    existing.roas = roas
+                    existing.ctr = ctr
+                    existing.cpc = cpc
+                else:
+                    self.db.add(CampaignHistoryModel(
+                        campaign_id=c.id,
+                        date=today,
+                        impressions=impressions,
+                        clicks=clicks,
+                        spend=spend,
+                        conversions=c.conversions or 0,
+                        revenue=c.revenue or 0.0,
+                        roas=roas,
+                        ctr=ctr,
+                        cpc=cpc,
+                    ))
+                saved += 1
+
+            self.db.commit()
+            logger.info(f"Saved daily snapshots for {saved} campaigns (date={today})")
+        except Exception as e:
+            logger.error(f"Failed to save daily snapshots: {e}")
+            self.db.rollback()
 
     def _log_activity(self, message: str):
         try:

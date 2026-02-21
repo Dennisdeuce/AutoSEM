@@ -13,8 +13,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.database import get_db, CampaignModel, ActivityLogModel
-from app.schemas import Campaign, CampaignCreate, CampaignUpdate
+from app.database import get_db, CampaignModel, CampaignHistoryModel, ActivityLogModel
+from app.schemas import Campaign, CampaignCreate, CampaignUpdate, CampaignHistory
 
 logger = logging.getLogger("AutoSEM.Campaigns")
 router = APIRouter()
@@ -126,6 +126,25 @@ def read_campaign(campaign_id: int, db: Session = Depends(get_db)):
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     return campaign
+
+
+@router.get("/{campaign_id}/history", response_model=List[CampaignHistory],
+            summary="Campaign performance history",
+            description="Returns up to 30 days of daily performance snapshots for a campaign.")
+def campaign_history(campaign_id: int, days: int = Query(30, ge=1, le=365),
+                     db: Session = Depends(get_db)):
+    campaign = db.query(CampaignModel).filter(CampaignModel.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    from datetime import timedelta
+    cutoff = datetime.utcnow().date() - timedelta(days=days)
+    rows = db.query(CampaignHistoryModel).filter(
+        CampaignHistoryModel.campaign_id == campaign_id,
+        CampaignHistoryModel.date >= cutoff,
+    ).order_by(CampaignHistoryModel.date.desc()).all()
+
+    return rows
 
 
 @router.put("/{campaign_id}", response_model=Campaign)

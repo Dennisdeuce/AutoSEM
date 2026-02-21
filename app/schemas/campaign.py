@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Optional
 from pydantic import BaseModel, model_validator
 
@@ -46,6 +47,23 @@ class Campaign(CampaignBase):
         self.ctr = round((clicks / impressions) * 100, 2) if impressions > 0 else 0.0
         self.cpc = round(spend / clicks, 2) if clicks > 0 else 0.0
         return self
+
+    class Config:
+        from_attributes = True
+
+
+class CampaignHistory(BaseModel):
+    id: int
+    campaign_id: int
+    date: date
+    impressions: int = 0
+    clicks: int = 0
+    spend: float = 0.0
+    conversions: int = 0
+    revenue: float = 0.0
+    roas: float = 0.0
+    ctr: float = 0.0
+    cpc: float = 0.0
 
     class Config:
         from_attributes = True
