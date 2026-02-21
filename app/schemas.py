@@ -3,7 +3,7 @@ Pydantic schemas for AutoSEM API
 """
 
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 # --- Products ---
@@ -72,6 +72,17 @@ class CampaignUpdate(CampaignBase):
 
 class Campaign(CampaignBase):
     id: int
+    ctr: Optional[float] = 0.0
+    cpc: Optional[float] = 0.0
+
+    @model_validator(mode="after")
+    def compute_metrics(self):
+        impressions = self.impressions or 0
+        clicks = self.clicks or 0
+        spend = self.spend or 0.0
+        self.ctr = round((clicks / impressions) * 100, 2) if impressions > 0 else 0.0
+        self.cpc = round(spend / clicks, 2) if clicks > 0 else 0.0
+        return self
 
     class Config:
         from_attributes = True
