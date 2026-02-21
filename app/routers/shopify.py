@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
 
-from app.database import get_db, ActivityLogModel
+from app.database import get_db, ActivityLogModel, SettingsModel
 
 logger = logging.getLogger("AutoSEM.Shopify")
 router = APIRouter()
@@ -566,10 +566,39 @@ async def webhook_order_created(request: Request, db: Session = Depends(get_db))
     attribution_svc = AttributionService(db)
     result = attribution_svc.attribute_order(order)
 
+    # First-sale detection: auto-exit awareness mode
+    first_sale_triggered = False
+    if total_price > 0:
+        try:
+            roas_row = db.query(SettingsModel).filter(
+                SettingsModel.key == "min_roas_threshold"
+            ).first()
+            current_threshold = float(roas_row.value) if roas_row and roas_row.value else None
+            logger.info(f"First-sale check: roas_row exists={roas_row is not None}, "
+                        f"value={roas_row.value if roas_row else 'N/A'}, threshold={current_threshold}")
+            if current_threshold is not None and current_threshold == 0:
+                roas_row.value = "1.5"
+                db.add(roas_row)
+                db.commit()
+                first_sale_triggered = True
+                _log_activity(
+                    db, "FIRST_SALE_DETECTED", str(order_number),
+                    f"${total_price:.2f} | customer={customer_email} | "
+                    f"items={len(line_items)} | discounts={','.join(d.get('code','') for d in discount_codes) or 'none'}"
+                )
+                _log_activity(
+                    db, "SETTINGS_AUTO_UPDATED", "min_roas_threshold",
+                    "Awareness mode OFF: min_roas_threshold changed from 0 to 1.5 (triggered by first sale)"
+                )
+                logger.info(f"First sale detected (order {order_number}, ${total_price:.2f}) — exited awareness mode, min_roas_threshold set to 1.5")
+        except Exception as e:
+            logger.error(f"First-sale detection failed: {e}", exc_info=True)
+
     return {
         "status": "ok",
         "order_number": order_number,
         "total_price": total_price,
         "items": len(line_items),
         "attribution": result,
+        "first_sale_triggered": first_sale_triggered,
     }
