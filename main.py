@@ -1,5 +1,7 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v2.5.1 - Phase 14: TikTok /campaigns endpoint, sync_data fix, router registration
+v2.5.0 - Phase 13: Klaviyo rewrite, store health monitor, hardcoded key removal
 v1.10.0 - Phase 10: Close the data loop — fix PerformanceSyncService DB token,
           CBO budget updates, manual optimizer trigger, campaign cleanup
 v1.9.0 - Phase 9: Order webhook handler with UTM attribution, discount code
@@ -55,6 +57,7 @@ def create_app():
         ("app.routers.dashboard", "/api/v1/dashboard", "Dashboard"),
         ("app.routers.meta", "/api/v1/meta", "Meta"),
         ("app.routers.tiktok", "/api/v1/tiktok", "TikTok"),
+        ("app.routers.tiktok_campaigns", "/api/v1/tiktok", "TikTok Campaigns"),
         ("app.routers.campaigns", "/api/v1/campaigns", "Campaigns"),
         ("app.routers.products", "/api/v1/products", "Products"),
         ("app.routers.settings", "/api/v1/settings", "Settings"),
