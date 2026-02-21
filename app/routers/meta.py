@@ -633,7 +633,10 @@ def create_ad(req: CreateAdRequest, db: Session = Depends(get_db)):
             },
             timeout=30,
         )
-        creative_resp.raise_for_status()
+        if creative_resp.status_code >= 400:
+            error_body = creative_resp.json() if creative_resp.content else {}
+            return {"status": "error", "message": f"Meta creative API error {creative_resp.status_code}",
+                    "meta_error": error_body}
         creative_id = creative_resp.json().get("id")
 
         if not creative_id:
