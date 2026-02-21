@@ -584,6 +584,7 @@ class CreateAdRequest(BaseModel):
     description: str
     link: str
     cta: str = "SHOP_NOW"
+    page_id: Optional[str] = None
 
 
 class UpdateAdRequest(BaseModel):
@@ -599,9 +600,9 @@ def create_ad(req: CreateAdRequest, db: Session = Depends(get_db)):
     if not access_token or not ad_account_id:
         return {"status": "error", "message": "Meta not configured"}
 
-    page_id = META_PAGE_ID
+    page_id = req.page_id or META_PAGE_ID
     if not page_id:
-        return {"status": "error", "message": "META_PAGE_ID not configured"}
+        return {"status": "error", "message": "META_PAGE_ID not configured. Pass page_id in request body."}
 
     try:
         # Step 1: Create AdCreative
