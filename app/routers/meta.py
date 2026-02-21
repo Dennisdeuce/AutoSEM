@@ -572,7 +572,7 @@ def get_full_campaign_structure(campaign_id: str, db: Session = Depends(get_db))
 
 # ─── Ad Creative CRUD (Phase 10B) ────────────────────────────────
 
-META_PAGE_ID = os.environ.get("META_PAGE_ID", "")
+META_PAGE_ID = os.environ.get("META_PAGE_ID", "177394692123504")
 
 
 class CreateAdRequest(BaseModel):
