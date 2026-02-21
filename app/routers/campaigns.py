@@ -30,32 +30,29 @@ class GenerateAdCopyRequest(BaseModel):
     platform: str = "meta"
 
 
-@router.delete("/cleanup", summary="Purge phantom campaigns",
-               description="Delete campaigns with zero spend/clicks/impressions, preserving the two known active Meta campaigns.")
-def cleanup_campaigns(db: Session = Depends(get_db)):
-    """Purge phantom campaigns: $0 spend, 0 clicks, 0 impressions — except known active campaigns."""
-    PROTECTED_IDS = ["120241759616260364", "120206746647300364"]
-
-    stale = db.query(CampaignModel).filter(
+@router.post("/purge-phantoms", summary="Purge phantom campaigns",
+             description="Delete campaigns where status is archived/deleted, total_spend is 0, "
+                         "and platform_campaign_id is null. These are local-only records that "
+                         "never ran on any ad platform.")
+def purge_phantoms(db: Session = Depends(get_db)):
+    """Delete phantom campaigns that have no platform link and zero spend."""
+    phantoms = db.query(CampaignModel).filter(
+        CampaignModel.status.in_(["archived", "deleted"]),
         (CampaignModel.total_spend == None) | (CampaignModel.total_spend == 0),
-        (CampaignModel.clicks == None) | (CampaignModel.clicks == 0),
-        (CampaignModel.impressions == None) | (CampaignModel.impressions == 0),
-        ~CampaignModel.platform_campaign_id.in_(PROTECTED_IDS),
+        CampaignModel.platform_campaign_id == None,
     ).all()
 
-    deleted_count = len(stale)
     deleted_names = []
-    for c in stale:
-        deleted_names.append(f"{c.name} (id={c.id}, platform={c.platform}, status={c.status})")
+    for c in phantoms:
+        deleted_names.append(f"{c.name} (id={c.id}, platform={c.platform})")
         db.delete(c)
 
-    if deleted_count > 0:
-        log = ActivityLogModel(
-            action="CAMPAIGN_CLEANUP",
+    if phantoms:
+        db.add(ActivityLogModel(
+            action="CAMPAIGN_PURGE",
             entity_type="system",
-            details=f"Purged {deleted_count} phantom campaigns (zero spend/clicks/impressions)",
-        )
-        db.add(log)
+            details=f"Purged {len(phantoms)} phantom campaigns (archived/deleted, no platform_id, $0 spend)",
+        ))
 
     db.commit()
 
@@ -65,8 +62,8 @@ def cleanup_campaigns(db: Session = Depends(get_db)):
     ).count()
 
     return {
-        "deleted": deleted_count,
-        "deleted_campaigns": deleted_names[:20],
+        "purged": len(phantoms),
+        "purged_campaigns": deleted_names[:50],
         "remaining": remaining,
         "active": active,
     }
@@ -116,6 +113,22 @@ def update_campaign(campaign_id: int, campaign: CampaignUpdate, db: Session = De
     db.refresh(db_campaign)
     logger.info(f"Updated campaign {campaign_id}: {db_campaign.name}")
     return db_campaign
+
+
+@router.delete("/{campaign_id}")
+def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
+    """Delete a single campaign by ID. Protected campaigns (114, 115) cannot be deleted."""
+    PROTECTED = {114, 115}
+    if campaign_id in PROTECTED:
+        raise HTTPException(status_code=403, detail=f"Campaign {campaign_id} is protected")
+    campaign = db.query(CampaignModel).filter(CampaignModel.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    name = campaign.name
+    db.delete(campaign)
+    db.commit()
+    logger.info(f"Deleted campaign {campaign_id}: {name}")
+    return {"deleted": campaign_id, "name": name}
 
 
 # ─── AI Ad Copy Generation ────────────────────────────────────────
