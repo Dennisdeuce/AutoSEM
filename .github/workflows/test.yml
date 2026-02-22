@@ -1,0 +1,48 @@
+name: AutoSEM Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    env:
+      DATABASE_URL: "sqlite:///./test_autosem.db"
+      META_APP_ID: "test"
+      META_APP_SECRET: "test"
+      META_AD_ACCOUNT_ID: "123456789"
+      META_ACCESS_TOKEN: "test_token"
+      TIKTOK_ACCESS_TOKEN: "test_token"
+      TIKTOK_ADVERTISER_ID: "test_adv"
+      SHOPIFY_CLIENT_ID: "test"
+      SHOPIFY_CLIENT_SECRET: "test"
+      KLAVIYO_API_KEY: "pk_test"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
