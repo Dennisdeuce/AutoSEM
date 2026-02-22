@@ -10,9 +10,9 @@ AutoSEM is an autonomous advertising platform built with FastAPI. It manages mul
 **Repo:** https://github.com/Dennisdeuce/AutoSEM (branch: main)
 **Claude Code Tasks:** See `autosem-claude-tasks.md` for 12 revenue-prioritized tasks
 
-## Current Version: 2.5.8 (GitHub)
+## Current Version: 2.5.9 (GitHub)
 
-To deploy: `POST /api/v1/deploy/pull` (updates workspace) → **Republish in Replit Deployments UI** (updates production).
+**Deployment:** Reserved-VM mode — `POST /api/v1/deploy/pull` updates production directly. Auto-deploy via GitHub Actions on push to main (`.github/workflows/deploy.yml`).
 
 17 routers, 120+ endpoints. Production smoke-tested: 51/54 pass. AI ad copy generation via Claude API (POST /campaigns/generate). Scheduler: midnight CST daily optimization (cron), hourly spend checks, daily performance snapshots, heartbeat ticks. Optimizer awareness-mode fix (won't auto-pause pre-revenue campaigns). Ad-level CRUD fully deployed. Klaviyo hardcoded key removed (BUG-11 fixed). Store health monitor. Meta Pixel auto-installer. Conversion funnel audit. TikTok /campaigns endpoint.
 
@@ -22,9 +22,10 @@ To deploy: `POST /api/v1/deploy/pull` (updates workspace) → **Republish in Rep
 # Run locally
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-# Deploy via API (updates workspace, then Republish for production):
+# Deploy via API (reserved-VM — updates production directly):
 curl -X POST https://auto-sem.replit.app/api/v1/deploy/pull \
   -H "X-Deploy-Key: autosem-deploy-2026"
+# Auto-deploy: pushes to main trigger .github/workflows/deploy.yml
 
 # Swagger docs
 https://auto-sem.replit.app/docs
@@ -174,8 +175,8 @@ All other rules active: CPC limits, landing page flags, scale-winner, emergency 
 
 1. **Meta budgets are in cents** — $25/day = 2500 in the API
 2. **CBO campaigns** — budget set at campaign level, not adset level
-3. **Deploy gap:** deploy/pull API updates workspace but NOT production. Must Republish in Replit UI.
-4. **After Republish:** Run `POST /api/v1/pixel/install` immediately to fix conversion tracking
+3. **Deploy:** Reserved-VM mode — deploy/pull updates production directly. Auto-deploy on push to main via GitHub Actions.
+4. **After deploy:** Run `POST /api/v1/pixel/install` if pixel not yet installed
 5. **After first sale:** Set min_roas_threshold back to 1.5
 6. **Shopify API for products:** Use Shopify-first approach (not Printful API)
 
@@ -186,7 +187,7 @@ All other rules active: CPC limits, landing page flags, scale-winner, emergency 
 | BUG-11: Klaviyo hardcoded fallback key rotted | Fixed v2.5.0 | Removed hardcoded key |
 | BUG-12: TikTok /campaigns 404 | Fixed v2.5.1 | Added tiktok_campaigns.py |
 | BUG-13: Klaviyo API key invalid in production | **OPEN** | Need new key via /validate-key |
-| BUG-14: Deploy/pull doesn't update production | **Fixed v2.5.3** | Improved restart + /status, /verify endpoints. Production still needs Republish (by design). |
+| BUG-14: Deploy/pull doesn't update production | **Fixed v2.5.3 + v2.5.9** | Switched to reserved-VM — deploy/pull now updates production directly. GitHub Actions auto-deploy on push. |
 | BUG-15: Meta Pixel missing from store | **OPEN** | Run POST /api/v1/pixel/install after Republish |
 | BUG-16: Campaign objective LINK_CLICKS not OUTCOME_SALES | **Fixed v2.5.5** | POST /meta/create-conversion-campaign, POST /meta/switch-objective |
 
@@ -209,3 +210,4 @@ All other rules active: CPC limits, landing page flags, scale-winner, emergency 
 - **Phase 18 (Feb 21):** Review solicitation — review-candidates, request-reviews (Judge.me + Klaviyo), seed-reviews with photo discount incentive (v2.5.6)
 - **Phase 19 (Feb 21):** A/B testing — create-test (ad duplication + 50/50 budget split), test-results (z-test for CTR significance), auto-optimize (pause loser, restore budget to winner) (v2.5.7)
 - **Phase 20 (Feb 21):** Test framework — pytest with 63 tests (health, meta, optimizer, dashboard), GitHub Actions CI on push/PR, production smoke test script (v2.5.8)
+- **Phase 21 (Feb 21):** Auto-deploy — GitHub Actions deploy.yml (push to main → deploy/pull → health verify), DEPLOY_KEY secret, reserved-VM deployment model (v2.5.9)

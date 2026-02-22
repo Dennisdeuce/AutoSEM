@@ -1,0 +1,35 @@
+name: AutoSEM Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger deploy/pull
+        run: |
+          curl -sf -X POST https://auto-sem.replit.app/api/v1/deploy/pull \
+            -H "X-Deploy-Key: ${{ secrets.DEPLOY_KEY }}" \
+            --max-time 30 \
+            --retry 2 \
+            --retry-delay 5
+
+      - name: Wait for restart
+        run: sleep 15
+
+      - name: Verify deployment
+        run: |
+          HEALTH=$(curl -sf --max-time 15 https://auto-sem.replit.app/health)
+          echo "Health response: $HEALTH"
+          VERSION=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")
+          echo "Deployed version: $VERSION"
+          STATUS=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+          if [ "$STATUS" != "healthy" ]; then
+            echo "ERROR: Health check failed — status: $STATUS"
+            exit 1
+          fi
+          echo "Deployment verified: v$VERSION is healthy"
