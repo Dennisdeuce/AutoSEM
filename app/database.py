@@ -194,3 +194,23 @@ class TikTokTokenModel(Base):
     advertiser_ids = Column(Text, nullable=True)  # JSON list
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ABTestModel(Base):
+    __tablename__ = "ab_tests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    test_name = Column(String, nullable=False)
+    campaign_id = Column(String, nullable=True)  # Meta campaign ID
+    original_ad_id = Column(String, nullable=False, index=True)
+    variant_ad_id = Column(String, nullable=True, index=True)
+    original_adset_id = Column(String, nullable=True)
+    variant_adset_id = Column(String, nullable=True)
+    variant_type = Column(String, nullable=False)  # headline, image, cta
+    variant_value = Column(Text, nullable=True)  # The modified value
+    status = Column(String, default="running")  # running, completed, winner_original, winner_variant, error
+    confidence_level = Column(Float, default=0.0)  # 0-100%
+    winner = Column(String, nullable=True)  # original, variant, inconclusive
+    original_budget_cents = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)

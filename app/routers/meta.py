@@ -1553,3 +1553,568 @@ def campaign_recommendations(db: Session = Depends(get_db)):
         "recommendations": recommendations,
         "campaigns": campaign_analysis,
     }
+
+
+# ─── A/B Testing ─────────────────────────────────────────────────
+
+class CreateABTestRequest(BaseModel):
+    original_ad_id: str
+    variant_type: str  # headline, image, cta
+    variant_value: str  # New headline text, image URL/hash, or CTA type
+    test_name: Optional[str] = None
+
+
+def _get_ad_details(access_token: str, ad_id: str) -> Optional[dict]:
+    """Fetch ad details including its creative, adset, and campaign."""
+    try:
+        resp = requests.get(
+            f"{META_GRAPH_BASE}/{ad_id}",
+            params={
+                "fields": "id,name,status,adset_id,campaign_id,creative{id,name,title,body,image_url,image_hash,thumbnail_url,call_to_action_type,object_story_spec}",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.error(f"Failed to fetch ad {ad_id}: {e}")
+        return None
+
+
+def _get_adset_budget(access_token: str, adset_id: str) -> Optional[dict]:
+    """Fetch adset budget and campaign info."""
+    try:
+        resp = requests.get(
+            f"{META_GRAPH_BASE}/{adset_id}",
+            params={
+                "fields": "id,name,daily_budget,campaign_id,targeting,optimization_goal,billing_event,promoted_object,status",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.error(f"Failed to fetch adset {adset_id}: {e}")
+        return None
+
+
+@router.post("/create-test",
+             summary="Create an A/B test for an ad creative",
+             description="Duplicates an ad with a single variant change (headline, image, or CTA), "
+                         "creates a parallel adset with 50/50 budget split, and tracks the test.")
+def create_ab_test(req: CreateABTestRequest, db: Session = Depends(get_db)):
+    """Create an A/B test by duplicating an ad and modifying one element.
+
+    Workflow:
+    1. Fetch original ad's creative details
+    2. Create new creative with the variant change
+    3. Create a new adset with half the original budget
+    4. Reduce original adset budget to the other half
+    5. Create the variant ad in the new adset
+    6. Store test metadata in DB
+    """
+    from app.database import ABTestModel
+
+    access_token = _get_active_token(db)
+    if not access_token or not META_AD_ACCOUNT_ID:
+        return {"status": "error", "message": "Meta not configured"}
+
+    if req.variant_type not in ("headline", "image", "cta"):
+        return {"status": "error", "message": "variant_type must be one of: headline, image, cta"}
+
+    # Step 1: Get original ad details
+    ad_details = _get_ad_details(access_token, req.original_ad_id)
+    if not ad_details:
+        return {"status": "error", "message": f"Could not fetch ad {req.original_ad_id}"}
+
+    original_creative = ad_details.get("creative", {})
+    original_adset_id = ad_details.get("adset_id")
+    campaign_id = ad_details.get("campaign_id")
+    ad_name = ad_details.get("name", "Ad")
+
+    if not original_creative.get("id"):
+        return {"status": "error", "message": "Original ad has no creative"}
+    if not original_adset_id:
+        return {"status": "error", "message": "Could not determine adset for this ad"}
+
+    # Get original creative's object_story_spec
+    original_oss = original_creative.get("object_story_spec", {})
+    if not original_oss:
+        # Fetch full creative
+        try:
+            cr_resp = requests.get(
+                f"{META_GRAPH_BASE}/{original_creative['id']}",
+                params={
+                    "fields": "id,name,object_story_spec,image_hash,image_url",
+                    "access_token": access_token,
+                    "appsecret_proof": _appsecret_proof(access_token),
+                },
+                timeout=15,
+            )
+            cr_resp.raise_for_status()
+            original_oss = cr_resp.json().get("object_story_spec", {})
+        except Exception as e:
+            return {"status": "error", "message": f"Could not fetch creative details: {e}"}
+
+    if not original_oss:
+        return {"status": "error", "message": "Creative has no object_story_spec — cannot clone"}
+
+    # Step 2: Build variant creative by modifying the specified element
+    variant_oss = json.loads(json.dumps(original_oss))  # Deep copy
+    link_data = variant_oss.get("link_data", {})
+
+    test_name = req.test_name or f"A/B Test: {req.variant_type} on {ad_name}"
+
+    if req.variant_type == "headline":
+        link_data["name"] = req.variant_value
+    elif req.variant_type == "image":
+        # variant_value can be an image URL or image hash
+        if req.variant_value.startswith("http"):
+            link_data["picture"] = req.variant_value
+            link_data.pop("image_hash", None)
+        else:
+            link_data["image_hash"] = req.variant_value
+            link_data.pop("picture", None)
+    elif req.variant_type == "cta":
+        cta_link = link_data.get("call_to_action", {}).get("value", {}).get("link", "")
+        link_data["call_to_action"] = {
+            "type": req.variant_value,
+            "value": {"link": cta_link} if cta_link else {},
+        }
+
+    variant_oss["link_data"] = link_data
+
+    try:
+        # Create variant creative
+        creative_resp = requests.post(
+            f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/adcreatives",
+            data={
+                "name": f"[B] {test_name}",
+                "object_story_spec": json.dumps(variant_oss),
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=20,
+        )
+        if creative_resp.status_code >= 400:
+            error_body = creative_resp.json() if creative_resp.content else {}
+            error_msg = error_body.get("error", {}).get("message", str(error_body))
+            return {"status": "error", "step": "create_variant_creative", "message": error_msg}
+
+        variant_creative_id = creative_resp.json().get("id")
+        if not variant_creative_id:
+            return {"status": "error", "step": "create_variant_creative", "message": "No creative ID returned"}
+
+        # Step 3: Get original adset budget, split 50/50
+        adset_info = _get_adset_budget(access_token, original_adset_id)
+        if not adset_info:
+            return {"status": "error", "step": "fetch_adset", "message": f"Could not fetch adset {original_adset_id}"}
+
+        original_budget = int(adset_info.get("daily_budget", 0))
+        half_budget = max(original_budget // 2, 100)  # Minimum $1.00/day
+
+        # Create variant adset with half budget
+        variant_adset_payload = {
+            "campaign_id": campaign_id,
+            "name": f"[B] {test_name}",
+            "daily_budget": str(half_budget),
+            "billing_event": adset_info.get("billing_event", "IMPRESSIONS"),
+            "optimization_goal": adset_info.get("optimization_goal", "LINK_CLICKS"),
+            "status": "ACTIVE",
+            "access_token": access_token,
+            "appsecret_proof": _appsecret_proof(access_token),
+        }
+
+        targeting = adset_info.get("targeting")
+        if targeting:
+            variant_adset_payload["targeting"] = json.dumps(targeting)
+
+        promoted_object = adset_info.get("promoted_object")
+        if promoted_object:
+            variant_adset_payload["promoted_object"] = json.dumps(promoted_object)
+
+        adset_resp = requests.post(
+            f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/adsets",
+            data=variant_adset_payload,
+            timeout=20,
+        )
+        if adset_resp.status_code >= 400:
+            error_body = adset_resp.json() if adset_resp.content else {}
+            error_msg = error_body.get("error", {}).get("message", str(error_body))
+            return {"status": "error", "step": "create_variant_adset", "message": error_msg}
+
+        variant_adset_id = adset_resp.json().get("id")
+        if not variant_adset_id:
+            return {"status": "error", "step": "create_variant_adset", "message": "No adset ID returned"}
+
+        # Reduce original adset budget to half
+        requests.post(
+            f"{META_GRAPH_BASE}/{original_adset_id}",
+            data={
+                "daily_budget": str(half_budget),
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+
+        # Step 4: Create variant ad in the new adset
+        ad_resp = requests.post(
+            f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/ads",
+            data={
+                "name": f"[B] {ad_name}",
+                "adset_id": variant_adset_id,
+                "creative": json.dumps({"creative_id": variant_creative_id}),
+                "status": "ACTIVE",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=20,
+        )
+        if ad_resp.status_code >= 400:
+            error_body = ad_resp.json() if ad_resp.content else {}
+            error_msg = error_body.get("error", {}).get("message", str(error_body))
+            return {"status": "error", "step": "create_variant_ad", "message": error_msg}
+
+        variant_ad_id = ad_resp.json().get("id")
+
+        # Step 5: Save test to DB
+        ab_test = ABTestModel(
+            test_name=test_name,
+            campaign_id=campaign_id,
+            original_ad_id=req.original_ad_id,
+            variant_ad_id=variant_ad_id,
+            original_adset_id=original_adset_id,
+            variant_adset_id=variant_adset_id,
+            variant_type=req.variant_type,
+            variant_value=req.variant_value,
+            status="running",
+            original_budget_cents=original_budget,
+        )
+        db.add(ab_test)
+        db.commit()
+        db.refresh(ab_test)
+
+        _log_activity(
+            db, "AB_TEST_CREATED", str(ab_test.id),
+            f"{test_name} | type={req.variant_type} | original={req.original_ad_id} | "
+            f"variant={variant_ad_id} | budget_split=${half_budget / 100:.2f} each",
+        )
+
+        return {
+            "status": "created",
+            "test_id": ab_test.id,
+            "test_name": test_name,
+            "campaign_id": campaign_id,
+            "original": {
+                "ad_id": req.original_ad_id,
+                "adset_id": original_adset_id,
+                "budget": f"${half_budget / 100:.2f}/day",
+            },
+            "variant": {
+                "ad_id": variant_ad_id,
+                "adset_id": variant_adset_id,
+                "creative_id": variant_creative_id,
+                "budget": f"${half_budget / 100:.2f}/day",
+                "variant_type": req.variant_type,
+                "variant_value": req.variant_value,
+            },
+            "original_budget_was": f"${original_budget / 100:.2f}/day",
+            "next_steps": [
+                "Wait for both variants to accumulate >1000 impressions each",
+                "Check results: GET /api/v1/meta/test-results",
+                "Auto-optimize when ready: POST /api/v1/meta/auto-optimize",
+            ],
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to create A/B test: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/test-results",
+            summary="Get A/B test results with statistical significance",
+            description="Fetches metrics for all running tests, calculates z-test for "
+                        "CTR difference, returns winner/inconclusive with confidence level.")
+def get_test_results(test_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """Get performance comparison for A/B tests with statistical significance.
+
+    Uses a two-proportion z-test on CTR to determine if the difference
+    between original and variant is statistically significant.
+    """
+    import math
+    from app.database import ABTestModel
+
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+
+    query = db.query(ABTestModel)
+    if test_id:
+        query = query.filter(ABTestModel.id == test_id)
+    else:
+        query = query.filter(ABTestModel.status == "running")
+
+    tests = query.all()
+    if not tests:
+        return {"status": "ok", "message": "No running A/B tests found", "tests": []}
+
+    results = []
+    for test in tests:
+        # Fetch insights for both ads (lifetime of the test)
+        test_created = test.created_at.strftime("%Y-%m-%d") if test.created_at else "2026-01-01"
+        from datetime import datetime as dt
+        today = dt.utcnow().strftime("%Y-%m-%d")
+        time_range = json.dumps({"since": test_created, "until": today})
+
+        def _fetch_ad_insights(ad_id: str) -> dict:
+            try:
+                resp = requests.get(
+                    f"{META_GRAPH_BASE}/{ad_id}/insights",
+                    params={
+                        "fields": "impressions,clicks,spend,ctr,cpc,actions,cost_per_action_type",
+                        "time_range": time_range,
+                        "access_token": access_token,
+                        "appsecret_proof": _appsecret_proof(access_token),
+                    },
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    data = resp.json().get("data", [])
+                    return data[0] if data else {}
+                return {}
+            except Exception as e:
+                logger.warning(f"Failed to fetch insights for ad {ad_id}: {e}")
+                return {}
+
+        original_insights = _fetch_ad_insights(test.original_ad_id)
+        variant_insights = _fetch_ad_insights(test.variant_ad_id) if test.variant_ad_id else {}
+
+        # Extract metrics
+        orig_impressions = int(original_insights.get("impressions", 0))
+        orig_clicks = int(original_insights.get("clicks", 0))
+        orig_spend = float(original_insights.get("spend", 0))
+        orig_ctr = orig_clicks / orig_impressions * 100 if orig_impressions > 0 else 0
+        orig_cpc = orig_spend / orig_clicks if orig_clicks > 0 else 0
+
+        var_impressions = int(variant_insights.get("impressions", 0))
+        var_clicks = int(variant_insights.get("clicks", 0))
+        var_spend = float(variant_insights.get("spend", 0))
+        var_ctr = var_clicks / var_impressions * 100 if var_impressions > 0 else 0
+        var_cpc = var_spend / var_clicks if var_clicks > 0 else 0
+
+        # Two-proportion z-test for CTR
+        total_impressions = orig_impressions + var_impressions
+        confidence = 0.0
+        z_score = 0.0
+        significant = False
+        winner = "inconclusive"
+
+        if orig_impressions > 0 and var_impressions > 0:
+            p1 = orig_clicks / orig_impressions
+            p2 = var_clicks / var_impressions
+            p_pool = (orig_clicks + var_clicks) / total_impressions
+            se = math.sqrt(p_pool * (1 - p_pool) * (1 / orig_impressions + 1 / var_impressions)) if p_pool > 0 and p_pool < 1 else 0
+
+            if se > 0:
+                z_score = (p2 - p1) / se
+
+                # Convert z-score to approximate confidence using normal CDF approximation
+                abs_z = abs(z_score)
+                # Abramowitz & Stegun approximation for standard normal CDF
+                t = 1.0 / (1.0 + 0.2316419 * abs_z)
+                d = 0.3989422804014327  # 1/sqrt(2*pi)
+                prob = d * math.exp(-abs_z * abs_z / 2.0) * (
+                    0.3193815 * t - 0.3565638 * t**2 + 1.781478 * t**3
+                    - 1.821256 * t**4 + 1.330274 * t**5
+                )
+                # Two-tailed p-value
+                p_value = 2 * prob
+                confidence = round((1 - p_value) * 100, 2)
+
+                significant = confidence >= 95.0
+                if significant:
+                    winner = "variant" if z_score > 0 else "original"
+
+        # Update test record
+        test.confidence_level = confidence
+        if significant and (orig_impressions >= 1000 or var_impressions >= 1000):
+            test.winner = winner
+        db.commit()
+
+        results.append({
+            "test_id": test.id,
+            "test_name": test.test_name,
+            "variant_type": test.variant_type,
+            "variant_value": test.variant_value,
+            "status": test.status,
+            "original": {
+                "ad_id": test.original_ad_id,
+                "impressions": orig_impressions,
+                "clicks": orig_clicks,
+                "ctr": round(orig_ctr, 3),
+                "cpc": round(orig_cpc, 2),
+                "spend": round(orig_spend, 2),
+            },
+            "variant": {
+                "ad_id": test.variant_ad_id,
+                "impressions": var_impressions,
+                "clicks": var_clicks,
+                "ctr": round(var_ctr, 3),
+                "cpc": round(var_cpc, 2),
+                "spend": round(var_spend, 2),
+            },
+            "statistics": {
+                "z_score": round(z_score, 4),
+                "confidence_pct": confidence,
+                "significant": significant,
+                "winner": winner,
+                "min_impressions_met": orig_impressions >= 1000 and var_impressions >= 1000,
+                "total_impressions": total_impressions,
+            },
+            "ctr_lift": round(var_ctr - orig_ctr, 3) if orig_impressions > 0 and var_impressions > 0 else None,
+            "ctr_lift_pct": round((var_ctr - orig_ctr) / orig_ctr * 100, 1) if orig_ctr > 0 else None,
+        })
+
+    return {
+        "status": "ok",
+        "tests_analyzed": len(results),
+        "results": results,
+    }
+
+
+@router.post("/auto-optimize",
+             summary="Auto-optimize completed A/B tests",
+             description="Checks running tests with >1000 impressions and >95% confidence. "
+                         "Pauses the losing variant and reallocates budget to the winner.")
+def auto_optimize_tests(db: Session = Depends(get_db)):
+    """Automatically pick winners and reallocate budget for mature A/B tests.
+
+    For each running test where both variants have 1000+ impressions
+    and statistical confidence is 95%+:
+    1. Pause the losing ad's adset
+    2. Restore full budget to the winning ad's adset
+    3. Mark test as completed
+    """
+    from datetime import datetime as dt
+    from app.database import ABTestModel
+
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "message": "No Meta token available"}
+
+    # First refresh results for all running tests
+    results_resp = get_test_results(db=db)
+    if results_resp.get("status") != "ok":
+        return results_resp
+
+    test_results = results_resp.get("results", [])
+    optimized = []
+    skipped = []
+
+    for result in test_results:
+        test_id = result["test_id"]
+        stats = result.get("statistics", {})
+        confidence = stats.get("confidence_pct", 0)
+        winner = stats.get("winner", "inconclusive")
+        min_met = stats.get("min_impressions_met", False)
+
+        if not min_met:
+            skipped.append({
+                "test_id": test_id,
+                "test_name": result["test_name"],
+                "reason": f"Need 1000+ impressions each (original={result['original']['impressions']}, variant={result['variant']['impressions']})",
+            })
+            continue
+
+        if confidence < 95.0 or winner == "inconclusive":
+            skipped.append({
+                "test_id": test_id,
+                "test_name": result["test_name"],
+                "reason": f"Confidence {confidence}% < 95% threshold",
+            })
+            continue
+
+        # This test has a winner — optimize
+        test = db.query(ABTestModel).filter(ABTestModel.id == test_id).first()
+        if not test or test.status != "running":
+            continue
+
+        if winner == "variant":
+            loser_adset_id = test.original_adset_id
+            winner_adset_id = test.variant_adset_id
+            winner_ad_id = test.variant_ad_id
+        else:
+            loser_adset_id = test.variant_adset_id
+            winner_adset_id = test.original_adset_id
+            winner_ad_id = test.original_ad_id
+
+        # Pause losing adset
+        pause_ok = False
+        try:
+            pause_resp = requests.post(
+                f"{META_GRAPH_BASE}/{loser_adset_id}",
+                data={
+                    "status": "PAUSED",
+                    "access_token": access_token,
+                    "appsecret_proof": _appsecret_proof(access_token),
+                },
+                timeout=15,
+            )
+            pause_ok = pause_resp.status_code == 200 and pause_resp.json().get("success", False)
+        except Exception as e:
+            logger.warning(f"Failed to pause losing adset {loser_adset_id}: {e}")
+
+        # Restore full budget to winner
+        budget_ok = False
+        full_budget = test.original_budget_cents or 0
+        if full_budget > 0 and winner_adset_id:
+            try:
+                budget_resp = requests.post(
+                    f"{META_GRAPH_BASE}/{winner_adset_id}",
+                    data={
+                        "daily_budget": str(full_budget),
+                        "access_token": access_token,
+                        "appsecret_proof": _appsecret_proof(access_token),
+                    },
+                    timeout=15,
+                )
+                budget_ok = budget_resp.status_code == 200 and budget_resp.json().get("success", False)
+            except Exception as e:
+                logger.warning(f"Failed to restore budget on winner adset {winner_adset_id}: {e}")
+
+        # Update test record
+        test.status = f"winner_{winner}"
+        test.winner = winner
+        test.confidence_level = confidence
+        test.completed_at = dt.utcnow()
+        db.commit()
+
+        _log_activity(
+            db, "AB_TEST_OPTIMIZED", str(test_id),
+            f"Winner: {winner} (ad {winner_ad_id}) | confidence={confidence}% | "
+            f"loser_paused={pause_ok} | budget_restored={budget_ok} (${full_budget / 100:.2f}/day)",
+        )
+
+        optimized.append({
+            "test_id": test_id,
+            "test_name": test.test_name,
+            "winner": winner,
+            "winner_ad_id": winner_ad_id,
+            "confidence": confidence,
+            "loser_adset_paused": pause_ok,
+            "budget_restored": budget_ok,
+            "restored_budget": f"${full_budget / 100:.2f}/day" if full_budget else "unknown",
+        })
+
+    return {
+        "status": "ok",
+        "optimized_count": len(optimized),
+        "skipped_count": len(skipped),
+        "optimized": optimized,
+        "skipped": skipped,
+    }

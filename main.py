@@ -1,5 +1,6 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v2.5.7 - Phase 19: A/B testing with statistical significance and auto-optimization
 v2.5.6 - Phase 18: Review solicitation for existing customers (Judge.me + Klaviyo)
 v2.5.5 - Phase 17: Conversion campaign creation, objective switching (BUG-16)
 v2.5.4 - Phase 16: Automated daily performance report with email delivery
