@@ -10,7 +10,7 @@ AutoSEM is an autonomous advertising platform built with FastAPI. It manages mul
 **Repo:** https://github.com/Dennisdeuce/AutoSEM (branch: main)
 **Claude Code Tasks:** See `autosem-claude-tasks.md` for 12 revenue-prioritized tasks
 
-## Current Version: 2.5.5 (GitHub)
+## Current Version: 2.5.6 (GitHub)
 
 To deploy: `POST /api/v1/deploy/pull` (updates workspace) → **Republish in Replit Deployments UI** (updates production).
 
@@ -197,3 +197,7 @@ All other rules active: CPC limits, landing page flags, scale-winner, emergency 
   - Conversion funnel audit endpoint (conversion_audit.py)
   - 12 Claude Code tasks created (autosem-claude-tasks.md)
   - Version bumped to 2.5.2
+- **Phase 15 (Feb 21):** Deploy restart fix, status/verify endpoints (v2.5.3)
+- **Phase 16 (Feb 21):** Automated daily performance report with email delivery (v2.5.4)
+- **Phase 17 (Feb 21):** Conversion campaign creation, objective switching, campaign recommendations (v2.5.5)
+- **Phase 18 (Feb 21):** Review solicitation — review-candidates, request-reviews (Judge.me + Klaviyo), seed-reviews with photo discount incentive (v2.5.6)

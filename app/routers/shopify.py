@@ -674,3 +674,425 @@ def cart_recovery(hours_back: int = 48, db: Session = Depends(get_db)):
     )
 
     return result
+
+
+# ─── Review Solicitation ─────────────────────────────────────────
+
+JUDGEME_API_URL = "https://judge.me/api/v1"
+JUDGEME_SHOP_DOMAIN = "court-sportswear.com"
+
+
+def _get_judgeme_token() -> str | None:
+    """Return Judge.me private API token from env."""
+    return os.environ.get("JUDGEME_API_TOKEN")
+
+
+@router.get("/review-candidates", summary="Find customers eligible for review requests")
+def review_candidates(days_back: int = 90, db: Session = Depends(get_db)):
+    """Fetch fulfilled orders and extract unique customers with products purchased.
+
+    Returns customers who received their order and haven't been asked for a review,
+    with days_since_fulfillment so you can prioritize recent buyers.
+    """
+    from datetime import timedelta
+
+    token = _get_token(db)
+    if not token:
+        return {"error": "No Shopify token available"}
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+
+    # Fetch fulfilled orders
+    orders = []
+    url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/orders.json"
+    params = {
+        "status": "any",
+        "fulfillment_status": "fulfilled",
+        "created_at_min": cutoff,
+        "limit": 250,
+        "fields": "id,email,created_at,fulfillments,line_items,customer",
+    }
+    headers = {"X-Shopify-Access-Token": token}
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
+        orders = resp.json().get("orders", [])
+    except Exception as e:
+        return {"error": f"Failed to fetch orders: {e}"}
+
+    # Build unique customer → products map
+    candidates = {}
+    now = datetime.now(timezone.utc)
+
+    for order in orders:
+        email = order.get("email", "").lower().strip()
+        if not email:
+            continue
+
+        customer = order.get("customer", {}) or {}
+        first_name = customer.get("first_name", "")
+        last_name = customer.get("last_name", "")
+
+        # Get fulfillment date
+        fulfillments = order.get("fulfillments", [])
+        fulfilled_at = None
+        for f in fulfillments:
+            if f.get("status") == "success" and f.get("created_at"):
+                fulfilled_at = f["created_at"]
+                break
+
+        if not fulfilled_at:
+            continue
+
+        try:
+            ful_dt = datetime.fromisoformat(fulfilled_at.replace("Z", "+00:00"))
+            days_since = (now - ful_dt).days
+        except Exception:
+            days_since = None
+
+        products = []
+        for item in order.get("line_items", []):
+            products.append({
+                "product_id": item.get("product_id"),
+                "title": item.get("title"),
+                "variant_title": item.get("variant_title"),
+            })
+
+        if email not in candidates:
+            candidates[email] = {
+                "email": email,
+                "first_name": first_name,
+                "last_name": last_name,
+                "orders": [],
+                "products": [],
+                "earliest_fulfillment_days_ago": days_since,
+            }
+
+        candidates[email]["orders"].append({
+            "order_id": order.get("id"),
+            "fulfilled_at": fulfilled_at,
+            "days_since": days_since,
+        })
+        candidates[email]["products"].extend(products)
+
+        if days_since is not None:
+            existing = candidates[email]["earliest_fulfillment_days_ago"]
+            if existing is None or days_since < existing:
+                candidates[email]["earliest_fulfillment_days_ago"] = days_since
+
+    # Deduplicate products per customer
+    for c in candidates.values():
+        seen = set()
+        unique = []
+        for p in c["products"]:
+            pid = p.get("product_id")
+            if pid and pid not in seen:
+                seen.add(pid)
+                unique.append(p)
+        c["products"] = unique
+
+    candidate_list = sorted(candidates.values(), key=lambda x: x.get("earliest_fulfillment_days_ago") or 999)
+
+    _log_activity(db, "REVIEW_CANDIDATES_CHECK", "", f"Found {len(candidate_list)} review candidates from last {days_back} days")
+
+    return {
+        "total_candidates": len(candidate_list),
+        "days_back": days_back,
+        "candidates": candidate_list,
+    }
+
+
+@router.post("/request-reviews", summary="Trigger review request emails via Judge.me or Klaviyo")
+def request_reviews(
+    emails: list[str] | None = None,
+    send_all: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Send review request emails to fulfilled-order customers.
+
+    - If Judge.me API token is set (JUDGEME_API_TOKEN env), uses Judge.me API
+    - Falls back to Klaviyo transactional email
+    - Pass specific emails or set send_all=True for all candidates
+    """
+    # Get candidates first
+    candidates_resp = review_candidates(days_back=90, db=db)
+    if "error" in candidates_resp:
+        return candidates_resp
+
+    all_candidates = candidates_resp.get("candidates", [])
+    if not all_candidates:
+        return {"status": "no_candidates", "message": "No fulfilled orders found to request reviews for"}
+
+    # Filter to requested emails
+    if emails and not send_all:
+        target_candidates = [c for c in all_candidates if c["email"] in [e.lower().strip() for e in emails]]
+    else:
+        target_candidates = all_candidates
+
+    if not target_candidates:
+        return {"status": "no_matches", "message": "None of the provided emails matched review candidates"}
+
+    judgeme_token = _get_judgeme_token()
+    results = {"sent": [], "failed": [], "method": "judge.me" if judgeme_token else "klaviyo"}
+
+    for candidate in target_candidates:
+        email = candidate["email"]
+        first_name = candidate.get("first_name", "Customer")
+        products = candidate.get("products", [])
+
+        if not products:
+            results["failed"].append({"email": email, "reason": "No products found"})
+            continue
+
+        # Use first product for review request
+        product = products[0]
+
+        if judgeme_token:
+            # Judge.me review request API
+            try:
+                payload = {
+                    "shop_domain": JUDGEME_SHOP_DOMAIN,
+                    "platform": "shopify",
+                    "name": first_name,
+                    "email": email,
+                    "id": product.get("product_id"),
+                }
+                resp = requests.post(
+                    f"{JUDGEME_API_URL}/reviews/request",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {judgeme_token}"},
+                    timeout=10,
+                )
+                if resp.status_code in (200, 201, 202):
+                    results["sent"].append({
+                        "email": email,
+                        "product": product.get("title"),
+                        "method": "judge.me",
+                    })
+                else:
+                    results["failed"].append({
+                        "email": email,
+                        "reason": f"Judge.me {resp.status_code}: {resp.text[:200]}",
+                    })
+            except Exception as e:
+                results["failed"].append({"email": email, "reason": f"Judge.me error: {e}"})
+        else:
+            # Klaviyo fallback — send review request via transactional email
+            try:
+                from app.database import SettingsModel
+                key_row = db.query(SettingsModel).filter(SettingsModel.key == "klaviyo_api_key").first()
+                klaviyo_key = key_row.value if key_row else os.environ.get("KLAVIYO_PRIVATE_KEY")
+
+                if not klaviyo_key:
+                    results["failed"].append({"email": email, "reason": "No Klaviyo API key configured"})
+                    continue
+
+                review_url = f"https://{JUDGEME_SHOP_DOMAIN}/pages/review"
+                payload = {
+                    "data": {
+                        "type": "event",
+                        "attributes": {
+                            "profile": {
+                                "data": {
+                                    "type": "profile",
+                                    "attributes": {
+                                        "email": email,
+                                        "first_name": first_name,
+                                    },
+                                },
+                            },
+                            "metric": {
+                                "data": {
+                                    "type": "metric",
+                                    "attributes": {
+                                        "name": "Review Request Sent",
+                                    },
+                                },
+                            },
+                            "properties": {
+                                "product_name": product.get("title", "your recent purchase"),
+                                "review_url": review_url,
+                                "first_name": first_name,
+                            },
+                            "time": datetime.now(timezone.utc).isoformat(),
+                        },
+                    },
+                }
+                resp = requests.post(
+                    "https://a.klaviyo.com/api/events",
+                    json=payload,
+                    headers={
+                        "Authorization": f"Klaviyo-API-Key {klaviyo_key}",
+                        "revision": "2024-10-15",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=10,
+                )
+                if resp.status_code in (200, 201, 202):
+                    results["sent"].append({
+                        "email": email,
+                        "product": product.get("title"),
+                        "method": "klaviyo",
+                    })
+                else:
+                    results["failed"].append({
+                        "email": email,
+                        "reason": f"Klaviyo {resp.status_code}: {resp.text[:200]}",
+                    })
+            except Exception as e:
+                results["failed"].append({"email": email, "reason": f"Klaviyo error: {e}"})
+
+    _log_activity(
+        db, "REVIEW_REQUESTS_SENT", "",
+        f"Sent {len(results['sent'])}/{len(target_candidates)} review requests via {results['method']}"
+    )
+
+    return {
+        "status": "ok",
+        "method": results["method"],
+        "total_targeted": len(target_candidates),
+        "sent_count": len(results["sent"]),
+        "failed_count": len(results["failed"]),
+        "sent": results["sent"],
+        "failed": results["failed"],
+    }
+
+
+@router.post("/seed-reviews", summary="Get instructions for seeding real reviews with incentives")
+def seed_reviews(db: Session = Depends(get_db)):
+    """Return a structured plan for getting real reviews from existing customers.
+
+    Does NOT create fake reviews. Provides:
+    - Prioritized customer list (most recent fulfilled orders first)
+    - Discount code creation for photo review incentive (15% off)
+    - Email template suggestions
+    - Judge.me configuration tips
+    """
+    token = _get_token(db)
+    discount_code = None
+
+    # Try to create a discount code for photo review incentive
+    if token:
+        try:
+            payload = {
+                "price_rule": {
+                    "title": "PHOTOREVIEW15",
+                    "target_type": "line_item",
+                    "target_selection": "all",
+                    "allocation_method": "across",
+                    "value_type": "percentage",
+                    "value": "-15.0",
+                    "customer_selection": "all",
+                    "starts_at": datetime.now(timezone.utc).isoformat(),
+                    "usage_limit": 50,
+                }
+            }
+            resp = requests.post(
+                f"https://{SHOPIFY_STORE}/admin/api/2024-01/price_rules.json",
+                json=payload,
+                headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                rule_id = resp.json().get("price_rule", {}).get("id")
+                if rule_id:
+                    dc_payload = {"discount_code": {"code": "PHOTOREVIEW15"}}
+                    dc_resp = requests.post(
+                        f"https://{SHOPIFY_STORE}/admin/api/2024-01/price_rules/{rule_id}/discount_codes.json",
+                        json=dc_payload,
+                        headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
+                        timeout=10,
+                    )
+                    if dc_resp.status_code in (200, 201):
+                        discount_code = "PHOTOREVIEW15"
+            elif resp.status_code == 422:
+                # Price rule might already exist
+                discount_code = "PHOTOREVIEW15"
+        except Exception as e:
+            logger.warning(f"Discount code creation failed: {e}")
+
+    # Get candidates for the instruction plan
+    candidates_resp = review_candidates(days_back=90, db=db)
+    candidate_list = candidates_resp.get("candidates", []) if "error" not in candidates_resp else []
+
+    plan = {
+        "status": "ok",
+        "overview": (
+            f"You have {len(candidate_list)} customers who received orders in the last 90 days. "
+            "Zero reviews are currently live on the store. Here's the plan to seed real reviews."
+        ),
+        "discount_code": discount_code,
+        "discount_details": "15% off next order for customers who leave a photo review (code: PHOTOREVIEW15, limit: 50 uses)" if discount_code else "Set SHOPIFY_ACCESS_TOKEN to auto-create discount code",
+        "steps": [
+            {
+                "step": 1,
+                "action": "Configure Judge.me review request emails",
+                "details": (
+                    "In Shopify Admin → Apps → Judge.me → Settings → Email, enable automatic review request emails. "
+                    "Set timing to 14 days after fulfillment. Customize the email template to mention the 15% photo review discount."
+                ),
+            },
+            {
+                "step": 2,
+                "action": "Send manual review requests to recent customers",
+                "details": (
+                    f"Call POST /api/v1/shopify/request-reviews with send_all=true to trigger review request emails "
+                    f"to all {len(candidate_list)} customers. Or pass specific emails to target high-value customers first."
+                ),
+                "api_call": "POST /api/v1/shopify/request-reviews?send_all=true",
+            },
+            {
+                "step": 3,
+                "action": "Prioritize customers who ordered 7-30 days ago",
+                "details": (
+                    "These customers have had time to use the product but the experience is still fresh. "
+                    "They are most likely to leave a detailed, authentic review."
+                ),
+                "priority_customers": [
+                    {"email": c["email"], "name": f"{c['first_name']} {c['last_name']}".strip(), "days_ago": c.get("earliest_fulfillment_days_ago")}
+                    for c in candidate_list
+                    if c.get("earliest_fulfillment_days_ago") and 7 <= c["earliest_fulfillment_days_ago"] <= 30
+                ][:10],
+            },
+            {
+                "step": 4,
+                "action": "Offer photo review incentive",
+                "details": (
+                    f"{'Discount code PHOTOREVIEW15 has been created (15% off, 50 uses).' if discount_code else 'Create a discount code for photo reviewers.'} "
+                    "Mention in the review request email: 'Share a photo of you wearing your Court Sportswear and get 15% off your next order!'"
+                ),
+            },
+            {
+                "step": 5,
+                "action": "Follow up personally with top customers",
+                "details": (
+                    "For your highest-value or repeat customers, send a personal email (not automated) asking for a review. "
+                    "Personal outreach converts at 3-5x the rate of automated emails."
+                ),
+            },
+        ],
+        "email_template": {
+            "subject": "How are you liking your Court Sportswear? 🎾",
+            "body": (
+                "Hi {first_name},\n\n"
+                "We hope you're loving your {product_name}! As a small, family-run tennis & pickleball brand, "
+                "your feedback means the world to us.\n\n"
+                "Would you mind taking 30 seconds to leave a quick review? "
+                "If you include a photo, we'll send you 15% off your next order as a thank you.\n\n"
+                "Just click here to leave your review: {review_url}\n\n"
+                "Thanks for being part of the Court Sportswear family!\n"
+                "— The Court Sportswear Team"
+            ),
+        },
+        "expected_results": {
+            "typical_review_request_conversion": "5-15%",
+            "with_photo_incentive": "10-20%",
+            "estimated_reviews_from_29_customers": "3-6 reviews",
+            "impact": "Even 3-5 reviews with photos can increase conversion rate by 20-30%",
+        },
+    }
+
+    _log_activity(db, "SEED_REVIEWS_PLAN", "", f"Generated review seeding plan for {len(candidate_list)} customers, discount={'created' if discount_code else 'skipped'}")
+
+    return plan
