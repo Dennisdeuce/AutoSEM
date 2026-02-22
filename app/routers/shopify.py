@@ -619,3 +619,58 @@ async def webhook_order_created(request: Request, db: Session = Depends(get_db))
         "first_sale_triggered": first_sale_triggered,
         "capi_purchase": capi_result,
     }
+
+
+# ─── Checkout Audit ──────────────────────────────────────────────
+
+@router.get("/checkout-audit", summary="Abandoned checkout audit report")
+def checkout_audit(days_back: int = 30, db: Session = Depends(get_db)):
+    """Analyze abandoned checkouts to diagnose conversion problems.
+
+    With 509 ad clicks and 0 purchases, this answers WHERE visitors drop off:
+    - Never reaching product pages?
+    - Adding to cart but abandoning checkout?
+    - Starting checkout but not completing payment?
+
+    Returns 7-day and 30-day abandonment analysis with UTM attribution
+    and actionable recommendations.
+    """
+    from app.services.checkout_audit import CheckoutAuditor
+
+    auditor = CheckoutAuditor(_api)
+    report = auditor.generate_report(days_back=days_back)
+
+    _log_activity(
+        db, "CHECKOUT_AUDIT_RUN", "",
+        f"7d={report.get('abandoned_checkouts_7d', 0)} | "
+        f"30d={report.get('abandoned_checkouts_30d', 0)} | "
+        f"value_30d={report.get('abandoned_cart_value_30d', '$0')}"
+    )
+
+    return report
+
+
+@router.get("/cart-recovery", summary="Get recoverable abandoned carts")
+def cart_recovery(hours_back: int = 48, db: Session = Depends(get_db)):
+    """Get abandoned checkouts from last N hours with recovery URLs.
+
+    Returns carts that have a customer email and recovery URL,
+    ready for Klaviyo abandoned cart recovery emails.
+
+    Use this data to:
+    1. Send targeted recovery emails via Klaviyo
+    2. Identify high-value carts worth personal outreach
+    3. Track which products are most frequently abandoned
+    """
+    from app.services.checkout_audit import CheckoutAuditor
+
+    auditor = CheckoutAuditor(_api)
+    result = auditor.get_recoverable_carts(hours_back=hours_back)
+
+    _log_activity(
+        db, "CART_RECOVERY_CHECK", "",
+        f"hours={hours_back} | recoverable={result.get('recoverable_count', 0)} | "
+        f"value={result.get('recoverable_value', '$0')}"
+    )
+
+    return result
