@@ -2,12 +2,11 @@
 
 BUG-14 fix: Improved restart reliability + status/verify endpoints.
 
-Replit deployment has TWO environments:
-  1. Workspace (dev): SIGTERM/sys.exit triggers supervisor restart with new code
-  2. Production (autoscale): Immutable build — MUST Republish in Replit UI
-
-This router makes the workspace restart as reliable as possible and provides
-clear diagnostics when running/disk versions don't match.
+Deployment mode: RESERVED VM
+  - Production is a persistent process (not immutable snapshot)
+  - deploy/pull fetches latest code and restarts the process
+  - New code is live immediately after restart — no Republish needed
+  - GitHub Actions auto-triggers deploy/pull on every push to main
 """
 
 import os
@@ -66,7 +65,6 @@ def _read_disk_version() -> str:
         with open(version_file, "r") as f:
             for line in f:
                 if line.startswith("VERSION"):
-                    # Parse: VERSION = "2.5.2"
                     return line.split("=", 1)[1].strip().strip('"').strip("'")
     except Exception as e:
         logger.warning(f"Could not read disk version: {e}")
@@ -85,18 +83,11 @@ def _get_git_head() -> str:
 def _verify_files_on_disk() -> dict:
     """After git pull, verify key files exist and are updated."""
     checks = {}
-
-    # Check version.py exists and is readable
     disk_version = _read_disk_version()
     checks["version_on_disk"] = disk_version
     checks["version_file_exists"] = disk_version != "unknown"
-
-    # Check main.py exists
     checks["main_py_exists"] = os.path.isfile("main.py")
-
-    # Check app directory
     checks["app_dir_exists"] = os.path.isdir("app")
-
     return checks
 
 
@@ -114,7 +105,6 @@ def _do_fetch_reset() -> dict:
     reset = _run(["git", "reset", "--hard", f"origin/{BRANCH}"])
     head = _run(["git", "log", "--oneline", "-1"])
 
-    # Verify files landed on disk
     file_checks = _verify_files_on_disk()
 
     if not file_checks["version_file_exists"]:
@@ -124,7 +114,14 @@ def _do_fetch_reset() -> dict:
             "file_checks": file_checks,
         }
 
-    # Update deploy state
+    # Install any new dependencies
+    if os.path.isfile("requirements.txt"):
+        try:
+            _run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "-q"], timeout=120)
+            logger.info("Dependencies installed from requirements.txt")
+        except Exception as e:
+            logger.warning(f"pip install failed (non-fatal): {e}")
+
     _deploy_state["last_deploy_at"] = datetime.now(timezone.utc).isoformat()
     _deploy_state["last_deploy_head"] = head.stdout.strip()
     _deploy_state["restart_pending"] = True
@@ -164,9 +161,8 @@ def _schedule_restart(delay: float = 2.0):
       2. After 3s if still alive: os.execv — replace process in-place
       3. After 3s more: sys.exit(0) — hard exit for process manager
 
-    Note: In Replit's autoscale production deployment, none of these
-    will load new code — you MUST Republish. These work for the
-    workspace/dev environment.
+    With reserved-vm deployment, the process restart picks up the new
+    code from disk. No Republish needed.
     """
     _deploy_state["restart_pending"] = True
     _deploy_state["restart_scheduled_at"] = datetime.now(timezone.utc).isoformat()
@@ -178,7 +174,6 @@ def _schedule_restart(delay: float = 2.0):
         except Exception as e:
             logger.warning(f"SIGTERM failed: {e}")
 
-        # If we're still alive after 3s, try execv
         _time.sleep(3)
         logger.info("Restart phase 2: SIGTERM didn't kill us, trying os.execv...")
         try:
@@ -186,7 +181,6 @@ def _schedule_restart(delay: float = 2.0):
         except Exception as e:
             logger.warning(f"os.execv failed: {e}")
 
-        # Last resort after another 3s
         _time.sleep(3)
         logger.info("Restart phase 3: execv didn't work, using sys.exit(0)...")
         sys.exit(0)
@@ -195,17 +189,17 @@ def _schedule_restart(delay: float = 2.0):
     logger.info(f"Restart sequence scheduled in {delay}s (3 strategies)")
 
 
-# ─── Endpoints ────────────────────────────────────────────────────
+# ——— Endpoints ————————————————————————————————————————
 
 @router.post("/pull", summary="Pull latest code from GitHub")
 async def deploy_pull(request: Request):
     """Pull latest code from GitHub main branch and restart.
 
     Requires X-Deploy-Key header for authentication.
-    After pulling, attempts to restart the process so new code loads.
+    After pulling, restarts the process so new code loads.
 
-    NOTE: In Replit production (autoscale), you must also Republish
-    in the Replit Deployments UI for changes to take effect.
+    With reserved-vm deployment, this is all you need — production
+    picks up the new code after restart. No Republish required.
     """
     key = request.headers.get("X-Deploy-Key", "")
     if key != DEPLOY_KEY:
@@ -218,14 +212,13 @@ async def deploy_pull(request: Request):
             _schedule_restart()
             result["status"] = "restarting"
             result["message"] = (
-                "Code updated. Process restart scheduled. "
-                "For production: Republish in Replit Deployments UI."
+                "Code updated and dependencies installed. Process restart scheduled. "
+                "Production will be live with new code in ~10 seconds."
             )
             result["next_steps"] = [
-                "Wait ~5s for restart to complete",
+                "Wait ~10s for restart to complete",
                 "GET /api/v1/deploy/status to verify versions match",
                 "If versions still don't match: POST /api/v1/deploy/verify",
-                "For production: Republish in Replit Deployments UI",
             ]
         return result
     except Exception as e:
@@ -270,23 +263,14 @@ async def github_webhook(request: Request):
 
 @router.get("/status", summary="Deploy status with version diagnostics")
 async def deploy_status():
-    """Check running version vs disk version vs git HEAD.
-
-    This is the primary diagnostic endpoint for BUG-14. If running_version
-    and disk_version differ, the process needs a restart. If they still
-    differ after restart, you need to Republish in Replit.
-    """
+    """Check running version vs disk version vs git HEAD."""
     disk_version = _read_disk_version()
     git_head = _get_git_head()
 
     version_match = disk_version == _RUNNING_VERSION
     needs_restart = not version_match
-    needs_republish = _deploy_state.get("restart_pending", False) and not version_match
 
-    # Check if .git exists
     is_git_repo = os.path.isdir(".git")
-
-    # Get recent commits if git repo
     recent_commits = []
     branch = None
     if is_git_repo:
@@ -300,6 +284,7 @@ async def deploy_status():
 
     return {
         "status": "ok",
+        "deployment_type": "reserved-vm",
         "running_version": _RUNNING_VERSION,
         "disk_version": disk_version,
         "version_match": version_match,
@@ -307,27 +292,23 @@ async def deploy_status():
         "branch": branch,
         "is_git_repo": is_git_repo,
         "needs_restart": needs_restart,
-        "needs_republish": needs_republish,
         "restart_pending": _deploy_state.get("restart_pending", False),
         "last_deploy_at": _deploy_state.get("last_deploy_at"),
         "last_deploy_head": _deploy_state.get("last_deploy_head"),
         "recent_commits": recent_commits,
+        "auto_deploy": "GitHub Actions on push to main",
         "diagnosis": (
             "Versions match — running latest code."
             if version_match
             else f"VERSION MISMATCH: running {_RUNNING_VERSION}, disk has {disk_version}. "
-                 "Process restart needed, or Republish in Replit for production."
+                 "POST /api/v1/deploy/verify to trigger restart."
         ),
     }
 
 
 @router.post("/verify", summary="Verify deploy and force restart if needed")
 async def deploy_verify(request: Request):
-    """Check if running version matches disk version. If not, trigger restart.
-
-    Call this after deploy/pull if /status shows a version mismatch.
-    This is the self-healing endpoint for BUG-14.
-    """
+    """Check if running version matches disk version. If not, trigger restart."""
     key = request.headers.get("X-Deploy-Key", "")
     if key != DEPLOY_KEY:
         raise HTTPException(status_code=403, detail="Invalid deploy key")
@@ -346,7 +327,6 @@ async def deploy_verify(request: Request):
             "git_head": git_head,
         }
 
-    # Versions don't match — try restart
     logger.warning(
         f"Version mismatch detected: running={_RUNNING_VERSION}, "
         f"disk={disk_version}. Triggering restart."
@@ -357,15 +337,14 @@ async def deploy_verify(request: Request):
         "status": "restarting",
         "message": (
             f"Version mismatch: running {_RUNNING_VERSION}, disk has {disk_version}. "
-            "Restart triggered. If this persists, Republish in Replit Deployments UI."
+            "Restart triggered. Production will update in ~10 seconds."
         ),
         "running_version": _RUNNING_VERSION,
         "disk_version": disk_version,
         "git_head": git_head,
         "next_steps": [
-            "Wait ~5s for restart",
+            "Wait ~10s for restart",
             "GET /api/v1/deploy/status to check again",
-            "If still mismatched: Republish in Replit Deployments UI",
-            "Manual fallback: Replit Shell → kill 1",
+            "Manual fallback: Replit Shell > kill 1",
         ],
     }
