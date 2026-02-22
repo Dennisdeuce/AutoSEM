@@ -1,47 +1,59 @@
 # AutoSEM Deploy Instructions
 
-## Quick Deploy (API)
+## How It Works (Fully Automated)
+
+AutoSEM uses **reserved-vm** deployment on Replit with **GitHub Actions** auto-deploy:
+
+1. Push code to GitHub (`main` branch)
+2. GitHub Actions automatically calls `POST /api/v1/deploy/pull`
+3. Replit pulls latest code, installs dependencies, and restarts
+4. Production is live with new code in ~15 seconds
+
+**No manual Republish needed.** Ever.
+
+## Manual Deploy (if needed)
 
 ```bash
-# 1. Pull latest code from GitHub
+# Trigger deploy manually
 curl -X POST https://auto-sem.replit.app/api/v1/deploy/pull \
   -H "X-Deploy-Key: autosem-deploy-2026"
 
-# 2. Wait ~5 seconds, then verify
+# Wait ~10 seconds, then verify
 curl https://auto-sem.replit.app/api/v1/deploy/status
 
-# 3. If versions don't match, force restart
+# If versions don't match, force restart
 curl -X POST https://auto-sem.replit.app/api/v1/deploy/verify \
   -H "X-Deploy-Key: autosem-deploy-2026"
 ```
-
-## Understanding the Two Environments
-
-Replit has **two separate environments**:
-
-| Environment | Updated by | Restart method |
-|-------------|-----------|---------------|
-| **Workspace** (dev) | `POST /deploy/pull` | Automatic (SIGTERM/exit) |
-| **Production** (autoscale) | Replit UI only | Republish in Deployments |
-
-`POST /deploy/pull` updates the **workspace** code and restarts the dev server. It does **NOT** update production. Production is an immutable build that only changes when you Republish.
-
-## Full Production Deploy
-
-1. Push code to GitHub (`git push origin main`)
-2. Pull to workspace: `POST /api/v1/deploy/pull` with `X-Deploy-Key` header
-3. Verify workspace: `GET /api/v1/deploy/status` (check `version_match: true`)
-4. **Republish**: Replit Dashboard > Deployments > Republish
-5. Verify production: `GET /api/v1/deploy/status` on production URL
 
 ## Deploy Endpoints
 
 | Endpoint | Method | Auth | Purpose |
 |----------|--------|------|---------|
-| `/api/v1/deploy/pull` | POST | X-Deploy-Key | Fetch + reset to origin/main, restart |
+| `/api/v1/deploy/pull` | POST | X-Deploy-Key | Fetch + reset to origin/main, install deps, restart |
 | `/api/v1/deploy/status` | GET | None | Version diagnostics (running vs disk vs git) |
 | `/api/v1/deploy/verify` | POST | X-Deploy-Key | Check versions, force restart if mismatched |
-| `/api/v1/deploy/github-webhook` | POST | X-Hub-Signature-256 | Auto-deploy on GitHub push |
+| `/api/v1/deploy/github-webhook` | POST | X-Hub-Signature-256 | Auto-deploy on GitHub push (alternative to Actions) |
+
+## Architecture
+
+**Deployment type:** Reserved VM (persistent process)
+- Production runs as a persistent uvicorn process on Replit
+- `deploy/pull` does `git fetch + reset --hard + pip install + process restart`
+- Process restart uses 3-phase strategy: SIGTERM > execv > sys.exit
+- New code is picked up from disk on restart — no container rebuild needed
+
+**Auto-deploy flow:**
+```
+GitHub push > Actions workflow > POST /deploy/pull > git pull > pip install > restart > live
+```
+
+## GitHub Actions Setup
+
+The workflow at `.github/workflows/deploy.yml` runs on every push to `main`.
+
+**Required secret:** `DEPLOY_KEY` = the deploy key value
+(Set in GitHub repo > Settings > Secrets and variables > Actions)
 
 ## Manual Fallback
 
@@ -49,24 +61,24 @@ If the API deploy doesn't work:
 
 ```bash
 # In Replit Shell:
-git pull origin main
+git fetch origin main && git reset --hard origin/main
+pip install -r requirements.txt
 kill 1
 ```
 
-`kill 1` kills the PID 1 process (the run command), which Replit's supervisor automatically restarts.
+`kill 1` kills PID 1 (the run command), which Replit's supervisor automatically restarts.
 
 ## Troubleshooting
 
 **`/deploy/status` shows version mismatch after pull:**
 - The process didn't restart. Try `POST /deploy/verify` to trigger another restart.
 - If that doesn't work: Replit Shell > `kill 1`
-- For production: Republish in Replit Deployments UI.
+
+**GitHub Actions deploy fails:**
+- Check the `DEPLOY_KEY` secret is set correctly in GitHub repo settings
+- Check that auto-sem.replit.app is reachable (Replit may be down)
+- Check Actions logs in GitHub > Actions tab
 
 **`/deploy/pull` returns git fetch error:**
 - Check that the Replit workspace has internet access
-- Verify the GitHub repo is public or credentials are configured
-
-**Production shows old version after Republish:**
-- Clear browser cache
-- Wait 30-60 seconds for the autoscale deployment to propagate
-- Check `/health` or `/version` endpoint for the running version
+- Verify the GitHub repo is accessible
