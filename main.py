@@ -1,26 +1,10 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
-v2.5.1 - Phase 14: TikTok /campaigns endpoint, sync_data fix, router registration
+v2.5.2 - Phase 14: Meta Pixel installer, conversion audit, TikTok /campaigns
+v2.5.1 - Phase 14: TikTok /campaigns endpoint, sync_data fix
 v2.5.0 - Phase 13: Klaviyo rewrite, store health monitor, hardcoded key removal
-v1.10.0 - Phase 10: Close the data loop — fix PerformanceSyncService DB token,
-          CBO budget updates, manual optimizer trigger, campaign cleanup
-v1.9.0 - Phase 9: Order webhook handler with UTM attribution, discount code
-         generation, customer data endpoint, dashboard revenue display
-v1.8.0 - Phase 8: Deploy restart fix, scheduler DB session, dashboard SEO tab,
-         DB error recovery, activity log auto-refresh
-v1.7.0 - Phase 7: Shopify app TOML, Klaviyo DB fallback, JSON-LD structured
-         data, XML sitemap generator, SEO router
-v1.6.0 - Phase 5: Deploy webhook, campaign schema fix, dashboard polish,
-         activity log viewer, scheduler debug
-v1.5.0 - Phase 4: Webhook fix, token refresh service, optimizer auto-actions,
-         Meta adset discovery, version management
-v1.4.0 - Phase 3: Shopify webhook registration, schema fixes, Google Ads hardening,
-         scheduler heartbeat, version management
-v1.3.0 - Add: Shopify integration router with auto-refresh client_credentials tokens
-v1.2.0 - Add: Campaign management, interest targeting, targeted campaigns
-v1.1.0 - Complete dashboard rebuild with TikTok metrics + aggregate top boxes
-       - All routers registered (dashboard, meta, tiktok, campaigns, etc.)
-       - Top 4 summary boxes aggregate across all ad platforms
+v1.10.0 - Phase 10: Close the data loop
+v1.9.0 - Phase 9: Order webhook handler with UTM attribution
 """
 
 import os
@@ -69,7 +53,8 @@ def create_app():
         ("app.routers.seo", "/api/v1/seo", "SEO"),
         ("app.routers.health", "/api/v1/health", "Health"),
         ("app.routers.store_health", "/api/v1/store-health", "Store Health"),
-        ("app.routers.pixel_installer", "/api/v1/pixel", "Pixel"),
+        ("app.routers.pixel_installer", "/api/v1/pixel", "Meta Pixel"),
+        ("app.routers.conversion_audit", "/api/v1/dashboard", "Conversion Audit"),
     ]
 
     routers_loaded = []
@@ -102,7 +87,6 @@ def create_app():
         def on_startup():
             start_scheduler()
             logger.info("Scheduler started")
-            # Register Shopify webhooks
             try:
                 from app.services.shopify_webhook_register import register_webhooks_on_startup
                 register_webhooks_on_startup()
