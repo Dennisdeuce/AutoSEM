@@ -1,5 +1,6 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v2.6.0 - Phase 22: Auto-install Meta Pixel on startup (revenue blocker fix)
 v2.5.9 - Phase 21: GitHub Actions auto-deploy on push to main (reserved-VM)
 v2.5.8 - Phase 20: pytest framework, 63 tests, GitHub Actions CI, smoke test
 v2.5.7 - Phase 19: A/B testing with statistical significance and auto-optimization
@@ -17,6 +18,8 @@ v1.9.0 - Phase 9: Order webhook handler with UTM attribution
 import os
 import sys
 import logging
+import threading
+import time
 from datetime import datetime
 
 from app.version import VERSION
@@ -86,7 +89,53 @@ def create_app():
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-    # Start background scheduler
+    # -----------------------------------------------------------
+    # Startup: scheduler, webhooks, and META PIXEL AUTO-INSTALL
+    # -----------------------------------------------------------
+    def _auto_install_pixel():
+        """Background task: install Meta Pixel if missing.
+        
+        Runs 30s after startup to ensure DB and Shopify token are ready.
+        This is the #1 revenue fix — without the pixel, Meta can't track
+        any conversions and all ad spend is blind.
+        """
+        time.sleep(30)
+        logger.info("Pixel auto-installer: checking if Meta Pixel is on court-sportswear.com...")
+        
+        try:
+            import requests as req
+            resp = req.get("https://court-sportswear.com", timeout=15)
+            body = resp.text.lower()
+            
+            if "fbq(" in body and "connect.facebook.net" in body:
+                logger.info("Pixel auto-installer: Meta Pixel already installed. No action needed.")
+                return
+            
+            logger.warning("Pixel auto-installer: Meta Pixel NOT FOUND. Installing now...")
+            
+            # Call our own pixel install endpoint
+            try:
+                install_resp = req.post(
+                    "http://localhost:8000/api/v1/pixel/install",
+                    timeout=30,
+                )
+                result = install_resp.json()
+                status = result.get("status", "unknown")
+                
+                if status in ("installed", "already_installed"):
+                    logger.info(f"Pixel auto-installer: SUCCESS — {result.get('message', status)}")
+                else:
+                    logger.error(f"Pixel auto-installer: FAILED — {result}")
+            except Exception as e:
+                logger.error(f"Pixel auto-installer: could not call install endpoint: {e}")
+                # Fallback: log instructions for manual install
+                logger.error(
+                    "MANUAL FIX: POST https://auto-sem.replit.app/api/v1/pixel/install "
+                    "OR run: curl -X POST http://localhost:8000/api/v1/pixel/install"
+                )
+        except Exception as e:
+            logger.error(f"Pixel auto-installer: failed to check storefront: {e}")
+
     try:
         from scheduler import start_scheduler, stop_scheduler
 
@@ -94,11 +143,18 @@ def create_app():
         def on_startup():
             start_scheduler()
             logger.info("Scheduler started")
+            
+            # Register Shopify webhooks
             try:
                 from app.services.shopify_webhook_register import register_webhooks_on_startup
                 register_webhooks_on_startup()
             except Exception as wh_err:
                 logger.warning(f"Shopify webhook registration skipped: {wh_err}")
+            
+            # Auto-install Meta Pixel in background (30s delay)
+            pixel_thread = threading.Thread(target=_auto_install_pixel, daemon=True)
+            pixel_thread.start()
+            logger.info("Meta Pixel auto-installer scheduled (30s delay)")
 
         @app.on_event("shutdown")
         def on_shutdown():
