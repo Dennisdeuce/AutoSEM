@@ -903,3 +903,653 @@ def capi_status(db: Session = Depends(get_db)):
             for p in pixels
         ],
     }
+
+
+# ─── Conversion Campaign & Objective Switching ───────────────────
+
+class CreateConversionCampaignRequest(BaseModel):
+    source_campaign_id: Optional[str] = None  # Copy targeting from this campaign
+    name: str = "Court Sportswear - Sales - Conversion Optimized"
+    daily_budget_cents: int = 1000  # $10/day default
+    optimization_goal: str = "OFFSITE_CONVERSIONS"  # or "VALUE"
+    pixel_id: Optional[str] = None  # Auto-detected if not provided
+    status: str = "PAUSED"  # Start paused for review
+
+
+class SwitchObjectiveRequest(BaseModel):
+    campaign_id: str  # Old campaign to replace
+    new_objective: str = "OUTCOME_SALES"  # New objective
+    daily_budget_cents: Optional[int] = None  # None = keep same budget
+    optimization_goal: str = "OFFSITE_CONVERSIONS"
+    pause_old: bool = True  # Pause the old campaign after creating new one
+
+
+def _resolve_pixel_id(access_token: str) -> Optional[str]:
+    """Resolve the pixel ID from the ad account."""
+    if not META_AD_ACCOUNT_ID:
+        return None
+    pixel_id = os.environ.get("META_PIXEL_ID", "")
+    if pixel_id:
+        return pixel_id
+    try:
+        resp = requests.get(
+            f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/adspixels",
+            params={
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+                "fields": "id,name",
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            pixels = resp.json().get("data", [])
+            if pixels:
+                return pixels[0]["id"]
+    except Exception as e:
+        logger.warning(f"Pixel ID resolution failed: {e}")
+    return None
+
+
+def _get_campaign_details(access_token: str, campaign_id: str) -> Optional[dict]:
+    """Fetch full campaign details including adsets, ads, and targeting."""
+    try:
+        # Campaign info
+        camp_resp = requests.get(
+            f"{META_GRAPH_BASE}/{campaign_id}",
+            params={
+                "fields": "id,name,status,daily_budget,lifetime_budget,objective,special_ad_categories",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+        camp_resp.raise_for_status()
+        campaign = camp_resp.json()
+
+        # Adsets with full targeting
+        adsets_resp = requests.get(
+            f"{META_GRAPH_BASE}/{campaign_id}/adsets",
+            params={
+                "fields": "id,name,daily_budget,status,targeting,optimization_goal,billing_event,bid_strategy,promoted_object",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=15,
+        )
+        adsets_resp.raise_for_status()
+        adsets = adsets_resp.json().get("data", [])
+
+        # Ads with creatives for each adset
+        for adset in adsets:
+            ads_resp = requests.get(
+                f"{META_GRAPH_BASE}/{adset['id']}/ads",
+                params={
+                    "fields": "id,name,status,creative{id}",
+                    "access_token": access_token,
+                    "appsecret_proof": _appsecret_proof(access_token),
+                },
+                timeout=15,
+            )
+            if ads_resp.status_code == 200:
+                adset["_ads"] = ads_resp.json().get("data", [])
+            else:
+                adset["_ads"] = []
+
+        campaign["_adsets"] = adsets
+        return campaign
+    except Exception as e:
+        logger.error(f"Failed to get campaign details for {campaign_id}: {e}")
+        return None
+
+
+@router.post("/create-conversion-campaign",
+             summary="Create a conversion-optimized campaign",
+             description="Create a new campaign with OUTCOME_SALES objective and pixel tracking. "
+                         "Copies targeting from an existing campaign if source_campaign_id is provided.")
+def create_conversion_campaign(req: CreateConversionCampaignRequest, db: Session = Depends(get_db)):
+    """Create a new campaign optimized for conversions (purchases).
+
+    BUG-16 fix: The current active campaign uses LINK_CLICKS which optimizes
+    for clicks, not purchases. This endpoint creates a proper conversion
+    campaign with OUTCOME_SALES objective once the Meta Pixel is installed.
+    """
+    access_token = _get_active_token(db)
+    if not access_token or not META_AD_ACCOUNT_ID:
+        return {"status": "error", "message": "Meta not configured"}
+
+    # Resolve pixel ID
+    pixel_id = req.pixel_id or _resolve_pixel_id(access_token)
+    if not pixel_id:
+        return {
+            "status": "error",
+            "message": "No pixel found. Install Meta Pixel first via POST /api/v1/pixel/install, "
+                       "or pass pixel_id in the request.",
+        }
+
+    # Get source campaign targeting if specified
+    source_targeting = None
+    source_adset = None
+    source_ads = []
+    if req.source_campaign_id:
+        source = _get_campaign_details(access_token, req.source_campaign_id)
+        if source and source.get("_adsets"):
+            source_adset = source["_adsets"][0]  # Use first adset
+            source_targeting = source_adset.get("targeting")
+            source_ads = source_adset.get("_ads", [])
+
+    try:
+        # Step 1: Create Campaign with OUTCOME_SALES objective
+        campaign_payload = {
+            "name": req.name,
+            "objective": "OUTCOME_SALES",
+            "status": req.status,
+            "special_ad_categories": "[]",
+            "access_token": access_token,
+            "appsecret_proof": _appsecret_proof(access_token),
+        }
+
+        camp_resp = requests.post(
+            f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/campaigns",
+            data=campaign_payload,
+            timeout=20,
+        )
+        camp_result = camp_resp.json()
+
+        if camp_resp.status_code >= 400 or not camp_result.get("id"):
+            error_msg = camp_result.get("error", {}).get("message", str(camp_result))
+            return {"status": "error", "step": "create_campaign", "message": error_msg, "meta_response": camp_result}
+
+        new_campaign_id = camp_result["id"]
+        logger.info(f"Created conversion campaign {new_campaign_id}: {req.name}")
+
+        # Step 2: Create Adset with conversion optimization
+        adset_payload = {
+            "campaign_id": new_campaign_id,
+            "name": f"{req.name} - Adset",
+            "optimization_goal": req.optimization_goal,
+            "billing_event": "IMPRESSIONS",
+            "daily_budget": str(req.daily_budget_cents),
+            "status": req.status,
+            "promoted_object": json.dumps({
+                "pixel_id": pixel_id,
+                "custom_event_type": "PURCHASE",
+            }),
+            "access_token": access_token,
+            "appsecret_proof": _appsecret_proof(access_token),
+        }
+
+        # Copy targeting from source, or use broad defaults
+        if source_targeting:
+            adset_payload["targeting"] = json.dumps(source_targeting)
+        else:
+            adset_payload["targeting"] = json.dumps({
+                "geo_locations": {"countries": ["US"]},
+                "age_min": 25,
+                "age_max": 65,
+            })
+
+        adset_resp = requests.post(
+            f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/adsets",
+            data=adset_payload,
+            timeout=20,
+        )
+        adset_result = adset_resp.json()
+
+        if adset_resp.status_code >= 400 or not adset_result.get("id"):
+            error_msg = adset_result.get("error", {}).get("message", str(adset_result))
+            return {
+                "status": "partial",
+                "step": "create_adset",
+                "campaign_id": new_campaign_id,
+                "message": f"Campaign created but adset failed: {error_msg}",
+                "meta_response": adset_result,
+            }
+
+        new_adset_id = adset_result["id"]
+        logger.info(f"Created conversion adset {new_adset_id}")
+
+        # Step 3: Copy ads from source (if available)
+        copied_ads = []
+        for ad in source_ads:
+            creative_id = ad.get("creative", {}).get("id")
+            if not creative_id:
+                continue
+            ad_resp = requests.post(
+                f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/ads",
+                data={
+                    "name": ad.get("name", "Copied Ad"),
+                    "adset_id": new_adset_id,
+                    "creative": json.dumps({"creative_id": creative_id}),
+                    "status": req.status,
+                    "access_token": access_token,
+                    "appsecret_proof": _appsecret_proof(access_token),
+                },
+                timeout=20,
+            )
+            if ad_resp.status_code == 200:
+                copied_ads.append({
+                    "ad_id": ad_resp.json().get("id"),
+                    "name": ad.get("name"),
+                    "creative_id": creative_id,
+                })
+
+        _log_activity(
+            db, "META_CONVERSION_CAMPAIGN_CREATED", new_campaign_id,
+            f"{req.name} | objective=OUTCOME_SALES | pixel={pixel_id} | "
+            f"budget=${req.daily_budget_cents / 100:.2f}/day | "
+            f"optimization={req.optimization_goal} | ads_copied={len(copied_ads)}",
+        )
+
+        budget_dollars = req.daily_budget_cents / 100
+        return {
+            "status": "created",
+            "campaign_id": new_campaign_id,
+            "adset_id": new_adset_id,
+            "name": req.name,
+            "objective": "OUTCOME_SALES",
+            "optimization_goal": req.optimization_goal,
+            "pixel_id": pixel_id,
+            "daily_budget": f"${budget_dollars:.2f}",
+            "initial_status": req.status,
+            "ads_copied": copied_ads,
+            "source_campaign_id": req.source_campaign_id,
+            "next_steps": [
+                f"Review campaign in Meta Ads Manager: https://adsmanager.facebook.com/adsmanager/manage/campaigns?act={META_AD_ACCOUNT_ID}",
+                "Add ad creatives if none were copied",
+                f"Activate when ready: POST /api/v1/meta/activate-campaign with campaign_id={new_campaign_id}",
+                "Monitor for 3-5 days to let Meta's algorithm learn",
+                "Once profitable, increase budget via POST /api/v1/meta/set-budget",
+            ],
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to create conversion campaign: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/switch-objective",
+             summary="Switch campaign objective (creates new, pauses old)",
+             description="Meta doesn't allow changing objectives on existing campaigns. "
+                         "This creates a new campaign with the new objective, copies ad sets and ads, "
+                         "then pauses the old campaign.")
+def switch_objective(req: SwitchObjectiveRequest, db: Session = Depends(get_db)):
+    """Switch a campaign's objective by creating a new one and pausing the old.
+
+    Meta's API does not allow modifying campaign objectives after creation.
+    This endpoint duplicates the campaign structure with the new objective.
+    """
+    access_token = _get_active_token(db)
+    if not access_token or not META_AD_ACCOUNT_ID:
+        return {"status": "error", "message": "Meta not configured"}
+
+    # Get source campaign full structure
+    source = _get_campaign_details(access_token, req.campaign_id)
+    if not source:
+        return {"status": "error", "message": f"Could not fetch campaign {req.campaign_id}"}
+
+    source_name = source.get("name", "Unknown Campaign")
+    source_objective = source.get("objective", "UNKNOWN")
+
+    # Resolve pixel for conversion objectives
+    pixel_id = None
+    if req.new_objective in ("OUTCOME_SALES", "OUTCOME_LEADS", "OUTCOME_ENGAGEMENT"):
+        pixel_id = _resolve_pixel_id(access_token)
+        if not pixel_id and req.new_objective == "OUTCOME_SALES":
+            return {
+                "status": "error",
+                "message": "OUTCOME_SALES requires a pixel. Install Meta Pixel first via POST /api/v1/pixel/install.",
+            }
+
+    # Determine budget
+    budget = req.daily_budget_cents
+    if not budget:
+        budget = int(source.get("daily_budget", 0)) or 1000
+
+    try:
+        # Step 1: Create new campaign
+        camp_resp = requests.post(
+            f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/campaigns",
+            data={
+                "name": f"{source_name} ({req.new_objective})",
+                "objective": req.new_objective,
+                "status": "PAUSED",
+                "special_ad_categories": json.dumps(source.get("special_ad_categories", [])),
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            },
+            timeout=20,
+        )
+        camp_result = camp_resp.json()
+        if camp_resp.status_code >= 400 or not camp_result.get("id"):
+            error_msg = camp_result.get("error", {}).get("message", str(camp_result))
+            return {"status": "error", "step": "create_campaign", "message": error_msg}
+
+        new_campaign_id = camp_result["id"]
+
+        # Step 2: Copy each adset and its ads
+        adsets_copied = []
+        total_ads_copied = 0
+
+        for src_adset in source.get("_adsets", []):
+            adset_payload = {
+                "campaign_id": new_campaign_id,
+                "name": src_adset.get("name", "Adset"),
+                "optimization_goal": req.optimization_goal,
+                "billing_event": src_adset.get("billing_event", "IMPRESSIONS"),
+                "daily_budget": str(budget),
+                "status": "PAUSED",
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+            }
+
+            # Copy targeting
+            targeting = src_adset.get("targeting")
+            if targeting:
+                adset_payload["targeting"] = json.dumps(targeting)
+
+            # Set promoted_object for conversion objectives
+            if pixel_id and req.new_objective == "OUTCOME_SALES":
+                adset_payload["promoted_object"] = json.dumps({
+                    "pixel_id": pixel_id,
+                    "custom_event_type": "PURCHASE",
+                })
+
+            adset_resp = requests.post(
+                f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/adsets",
+                data=adset_payload,
+                timeout=20,
+            )
+            adset_result = adset_resp.json()
+
+            if adset_resp.status_code >= 400 or not adset_result.get("id"):
+                error_msg = adset_result.get("error", {}).get("message", "")
+                adsets_copied.append({"source_id": src_adset["id"], "error": error_msg})
+                continue
+
+            new_adset_id = adset_result["id"]
+            ads_in_adset = 0
+
+            # Copy ads
+            for ad in src_adset.get("_ads", []):
+                creative_id = ad.get("creative", {}).get("id")
+                if not creative_id:
+                    continue
+                ad_resp = requests.post(
+                    f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/ads",
+                    data={
+                        "name": ad.get("name", "Ad"),
+                        "adset_id": new_adset_id,
+                        "creative": json.dumps({"creative_id": creative_id}),
+                        "status": "PAUSED",
+                        "access_token": access_token,
+                        "appsecret_proof": _appsecret_proof(access_token),
+                    },
+                    timeout=20,
+                )
+                if ad_resp.status_code == 200:
+                    ads_in_adset += 1
+                    total_ads_copied += 1
+
+            adsets_copied.append({
+                "source_id": src_adset["id"],
+                "new_id": new_adset_id,
+                "ads_copied": ads_in_adset,
+            })
+
+        # Step 3: Pause old campaign if requested
+        old_paused = False
+        if req.pause_old:
+            pause_resp = requests.post(
+                f"{META_GRAPH_BASE}/{req.campaign_id}",
+                data={
+                    "status": "PAUSED",
+                    "access_token": access_token,
+                    "appsecret_proof": _appsecret_proof(access_token),
+                },
+                timeout=15,
+            )
+            old_paused = pause_resp.status_code == 200 and pause_resp.json().get("success", False)
+
+        _log_activity(
+            db, "META_OBJECTIVE_SWITCHED", new_campaign_id,
+            f"{source_objective} -> {req.new_objective} | "
+            f"old={req.campaign_id} (paused={old_paused}) | "
+            f"new={new_campaign_id} | adsets={len(adsets_copied)} | ads={total_ads_copied}",
+        )
+
+        return {
+            "status": "created",
+            "old_campaign": {
+                "id": req.campaign_id,
+                "name": source_name,
+                "objective": source_objective,
+                "paused": old_paused,
+            },
+            "new_campaign": {
+                "id": new_campaign_id,
+                "name": f"{source_name} ({req.new_objective})",
+                "objective": req.new_objective,
+                "optimization_goal": req.optimization_goal,
+                "pixel_id": pixel_id,
+                "daily_budget": f"${budget / 100:.2f}",
+            },
+            "adsets_copied": adsets_copied,
+            "total_ads_copied": total_ads_copied,
+            "next_steps": [
+                "Review new campaign in Meta Ads Manager",
+                f"Activate: POST /api/v1/meta/activate-campaign with campaign_id={new_campaign_id}",
+                "Monitor for 3-5 days for Meta's learning phase",
+            ],
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to switch objective: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/campaign-recommendations",
+            summary="Campaign optimization recommendations",
+            description="Analyze current campaigns and recommend objective changes, "
+                        "budget adjustments, and audience modifications")
+def campaign_recommendations(db: Session = Depends(get_db)):
+    """Analyze all Meta campaigns and generate actionable recommendations.
+
+    Checks pixel status, campaign objectives, performance metrics,
+    and budget efficiency to recommend improvements.
+    """
+    access_token = _get_active_token(db)
+    if not access_token or not META_AD_ACCOUNT_ID:
+        return {"status": "error", "message": "Meta not configured"}
+
+    recommendations = []
+    campaign_analysis = []
+
+    # Check pixel status
+    pixel_id = _resolve_pixel_id(access_token)
+    pixel_installed = bool(pixel_id)
+
+    if not pixel_installed:
+        recommendations.append({
+            "priority": "CRITICAL",
+            "category": "pixel",
+            "title": "Install Meta Pixel",
+            "detail": "No pixel found on ad account. Without a pixel, conversion "
+                      "optimization (OUTCOME_SALES) is impossible. All campaigns are "
+                      "flying blind — Meta cannot track purchases, add-to-carts, or any events.",
+            "action": "POST /api/v1/pixel/install",
+        })
+
+    # Fetch all campaigns with insights
+    try:
+        from datetime import datetime, timedelta
+        end_date = datetime.utcnow().strftime("%Y-%m-%d")
+        start_date = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+        resp = requests.get(
+            f"{META_GRAPH_BASE}/act_{META_AD_ACCOUNT_ID}/campaigns",
+            params={
+                "fields": (
+                    "id,name,status,daily_budget,objective,"
+                    f"insights.time_range({{\"since\":\"{start_date}\",\"until\":\"{end_date}\"}})"
+                    "{spend,impressions,clicks,ctr,cpc,actions,cost_per_action_type}"
+                ),
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+                "limit": 50,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        campaigns = resp.json().get("data", [])
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to fetch campaigns: {e}"}
+
+    for camp in campaigns:
+        camp_id = camp.get("id", "")
+        name = camp.get("name", "")
+        status = camp.get("status", "UNKNOWN")
+        objective = camp.get("objective", "UNKNOWN")
+        daily_budget = int(camp.get("daily_budget", 0))
+        budget_dollars = daily_budget / 100 if daily_budget else 0
+
+        insights = camp.get("insights", {}).get("data", [{}])
+        insight = insights[0] if insights else {}
+        spend = float(insight.get("spend", 0))
+        clicks = int(insight.get("clicks", 0))
+        impressions = int(insight.get("impressions", 0))
+        ctr = float(insight.get("ctr", 0))
+        cpc = float(insight.get("cpc", 0))
+
+        # Extract conversions from actions
+        purchases = 0
+        for action in insight.get("actions", []):
+            if action.get("action_type") in ("purchase", "offsite_conversion.fb_pixel_purchase"):
+                purchases += int(action.get("value", 0))
+
+        roas = 0
+        analysis = {
+            "campaign_id": camp_id,
+            "name": name,
+            "status": status,
+            "objective": objective,
+            "budget": f"${budget_dollars:.2f}/day",
+            "spend_7d": round(spend, 2),
+            "clicks_7d": clicks,
+            "impressions_7d": impressions,
+            "ctr_7d": round(ctr, 2),
+            "cpc_7d": round(cpc, 2),
+            "purchases_7d": purchases,
+        }
+        campaign_analysis.append(analysis)
+
+        if status != "ACTIVE":
+            continue
+
+        # Recommendation: Wrong objective
+        if objective in ("LINK_CLICKS", "POST_ENGAGEMENT", "BRAND_AWARENESS") and pixel_installed:
+            recommendations.append({
+                "priority": "HIGH",
+                "category": "objective",
+                "campaign_id": camp_id,
+                "campaign_name": name,
+                "title": f"Switch '{name}' from {objective} to OUTCOME_SALES",
+                "detail": (
+                    f"Campaign is using {objective} which optimizes for clicks, not purchases. "
+                    f"With the pixel installed, switch to OUTCOME_SALES to optimize for revenue. "
+                    f"Currently: ${spend:.2f} spend, {clicks} clicks, {purchases} purchases in 7 days."
+                ),
+                "action": f"POST /api/v1/meta/switch-objective with campaign_id={camp_id}",
+            })
+        elif objective in ("LINK_CLICKS", "POST_ENGAGEMENT") and not pixel_installed:
+            recommendations.append({
+                "priority": "MEDIUM",
+                "category": "objective",
+                "campaign_id": camp_id,
+                "campaign_name": name,
+                "title": f"'{name}' needs OUTCOME_SALES but pixel must be installed first",
+                "detail": (
+                    f"Campaign uses {objective}. Install the pixel first, then switch objective. "
+                    f"Current performance: ${spend:.2f} spend, {clicks} clicks, {ctr:.2f}% CTR."
+                ),
+                "action": "1) POST /api/v1/pixel/install  2) POST /api/v1/meta/switch-objective",
+            })
+
+        # Recommendation: High CPC
+        if cpc > 0.50 and clicks > 10:
+            recommendations.append({
+                "priority": "MEDIUM",
+                "category": "budget",
+                "campaign_id": camp_id,
+                "campaign_name": name,
+                "title": f"High CPC on '{name}': ${cpc:.2f}",
+                "detail": (
+                    f"CPC of ${cpc:.2f} is above $0.50 threshold. Consider: "
+                    "refreshing ad creatives, narrowing audience targeting, "
+                    "or testing different placements."
+                ),
+                "action": "Review ad creatives and audience overlap in Ads Manager",
+            })
+
+        # Recommendation: Low CTR
+        if ctr < 1.0 and impressions > 1000:
+            recommendations.append({
+                "priority": "MEDIUM",
+                "category": "creative",
+                "campaign_id": camp_id,
+                "campaign_name": name,
+                "title": f"Low CTR on '{name}': {ctr:.2f}%",
+                "detail": (
+                    f"CTR of {ctr:.2f}% is below 1% with {impressions} impressions. "
+                    "Ad creative may not resonate with the audience. Test new images, "
+                    "headlines, and primary text variations."
+                ),
+                "action": "POST /api/v1/meta/create-ad with new creative variations",
+            })
+
+        # Recommendation: Good performance, scale up
+        if ctr > 3.0 and cpc < 0.20 and spend > 5:
+            recommendations.append({
+                "priority": "LOW",
+                "category": "budget",
+                "campaign_id": camp_id,
+                "campaign_name": name,
+                "title": f"Scale winner '{name}': {ctr:.2f}% CTR, ${cpc:.2f} CPC",
+                "detail": (
+                    f"Strong performance with {ctr:.2f}% CTR and ${cpc:.2f} CPC. "
+                    f"Consider increasing budget from ${budget_dollars:.2f}/day. "
+                    "Scale by 20-30% every 3 days to avoid disrupting the algorithm."
+                ),
+                "action": f"POST /api/v1/meta/set-budget with daily_budget_cents={int(daily_budget * 1.25)}",
+            })
+
+        # Recommendation: Zero purchases with significant spend
+        if spend > 20 and purchases == 0 and pixel_installed:
+            recommendations.append({
+                "priority": "HIGH",
+                "category": "conversion",
+                "campaign_id": camp_id,
+                "campaign_name": name,
+                "title": f"${spend:.2f} spent with 0 purchases on '{name}'",
+                "detail": (
+                    "Significant ad spend with no conversions. Check: "
+                    "1) Pixel is firing on checkout/purchase pages, "
+                    "2) Landing page experience and load time, "
+                    "3) Product pricing and shipping costs, "
+                    "4) Checkout flow on mobile devices."
+                ),
+                "action": "GET /api/v1/pixel/verify and GET /api/v1/shopify/checkout-audit",
+            })
+
+    # Sort recommendations by priority
+    priority_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    recommendations.sort(key=lambda r: priority_order.get(r.get("priority", "LOW"), 99))
+
+    return {
+        "status": "ok",
+        "pixel_installed": pixel_installed,
+        "pixel_id": pixel_id,
+        "campaigns_analyzed": len(campaign_analysis),
+        "recommendations_count": len(recommendations),
+        "recommendations": recommendations,
+        "campaigns": campaign_analysis,
+    }
