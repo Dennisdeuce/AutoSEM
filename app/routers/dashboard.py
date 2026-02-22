@@ -495,3 +495,68 @@ def fix_database_data(db: Session = Depends(get_db)):
         fixed += 1
     db.commit()
     return {"status": "fixed", "campaigns_fixed": fixed}
+
+
+# ─── Daily Report ────────────────────────────────────────────────
+
+@router.get("/daily-report", summary="Preview daily performance report",
+            description="Generate the daily report and return it (metrics, comparison, HTML preview)")
+def daily_report(days_ago: int = 1, db: Session = Depends(get_db)):
+    """Generate and return the daily performance report without sending.
+
+    Use days_ago=1 for yesterday (default), days_ago=0 for today, etc.
+    Returns metrics, day-over-day comparison, recommendations, and full HTML.
+    """
+    from datetime import date, timedelta
+    from app.services.daily_report import DailyReportService
+
+    report_date = date.today() - timedelta(days=days_ago)
+    svc = DailyReportService(db)
+    report = svc.generate_report(report_date)
+    return report
+
+
+@router.post("/send-report", summary="Generate and send daily report now",
+             description="Generate the daily report and email it immediately")
+def send_report(recipient: str = None, days_ago: int = 1, db: Session = Depends(get_db)):
+    """Generate and send the daily performance report via email.
+
+    Uses Klaviyo transactional API first, falls back to SMTP.
+    Set REPORT_RECIPIENT env var for default recipient, or pass ?recipient=email.
+    """
+    from datetime import date, timedelta
+    from app.services.daily_report import DailyReportService
+
+    report_date = date.today() - timedelta(days=days_ago)
+    svc = DailyReportService(db)
+    report = svc.generate_report(report_date)
+    result = svc.send_report(report, recipient=recipient)
+
+    # Log the send attempt
+    try:
+        log = ActivityLogModel(
+            action="DAILY_REPORT_SENT" if result.get("status") == "sent" else "DAILY_REPORT_FAILED",
+            entity_type="dashboard",
+            entity_id="",
+            details=(
+                f"method={result.get('method', 'none')} | "
+                f"to={result.get('to', recipient or 'default')} | "
+                f"date={report.get('report_date', '?')}"
+            ),
+        )
+        db.add(log)
+        db.commit()
+    except Exception:
+        pass
+
+    return {
+        "report_date": report.get("report_date"),
+        "delivery": result,
+        "metrics_summary": {
+            "spend": report.get("metrics", {}).get("meta", {}).get("spend", 0),
+            "clicks": report.get("metrics", {}).get("meta", {}).get("clicks", 0),
+            "orders": report.get("metrics", {}).get("shopify", {}).get("orders", 0),
+            "revenue": report.get("metrics", {}).get("shopify", {}).get("revenue", 0),
+        },
+        "recommendations": report.get("recommendations", []),
+    }

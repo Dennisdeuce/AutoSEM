@@ -10,7 +10,7 @@ AutoSEM is an autonomous advertising platform built with FastAPI. It manages mul
 **Repo:** https://github.com/Dennisdeuce/AutoSEM (branch: main)
 **Claude Code Tasks:** See `autosem-claude-tasks.md` for 12 revenue-prioritized tasks
 
-## Current Version: 2.5.3 (GitHub)
+## Current Version: 2.5.4 (GitHub)
 
 To deploy: `POST /api/v1/deploy/pull` (updates workspace) → **Republish in Replit Deployments UI** (updates production).
 
@@ -101,7 +101,7 @@ curl https://auto-sem.replit.app/api/v1/pixel/verify
 
 **Database:** PostgreSQL on Neon (`ep-delicate-queen-ah2ayed9.c-3.us-east-1.aws.neon.tech/neondb`)
 
-**Scheduler** (`scheduler.py`): APScheduler runs 7 jobs — daily optimization, 6h intra-day, 2h perf sync, daily snapshots, hourly spend check, hourly heartbeat, 20h Shopify token refresh.
+**Scheduler** (`scheduler.py`): APScheduler runs 8 jobs — daily optimization, 6h intra-day, 2h perf sync, daily snapshots, hourly spend check, hourly heartbeat, 08:00 UTC daily report email, 20h Shopify token refresh.
 
 ## Active Meta Campaigns (Updated Feb 21, 2026)
 

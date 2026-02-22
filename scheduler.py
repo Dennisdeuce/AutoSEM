@@ -454,6 +454,19 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    # Daily performance report at 08:00 UTC (2:00 AM CST)
+    try:
+        from app.services.daily_report import run_daily_report
+        scheduler.add_job(
+            run_daily_report,
+            trigger=CronTrigger(hour=8, minute=0, timezone="UTC"),
+            id="daily_report",
+            name="Daily Performance Report (08:00 UTC)",
+            replace_existing=True,
+        )
+    except Exception as e:
+        logger.warning(f"Daily report job not loaded: {e}")
+
     # Refresh Shopify token every 20 hours (tokens expire in ~24h)
     try:
         from app.services.shopify_token import scheduled_token_refresh
