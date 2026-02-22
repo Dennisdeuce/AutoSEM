@@ -1,5 +1,6 @@
 """AutoSEM - Autonomous Search Engine Marketing Platform
 
+v2.5.3 - Phase 15: Deploy restart fix (BUG-14), status/verify endpoints
 v2.5.2 - Phase 14: Meta Pixel installer, conversion audit, TikTok /campaigns
 v2.5.1 - Phase 14: TikTok /campaigns endpoint, sync_data fix
 v2.5.0 - Phase 13: Klaviyo rewrite, store health monitor, hardcoded key removal

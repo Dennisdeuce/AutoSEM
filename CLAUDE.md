@@ -10,7 +10,7 @@ AutoSEM is an autonomous advertising platform built with FastAPI. It manages mul
 **Repo:** https://github.com/Dennisdeuce/AutoSEM (branch: main)
 **Claude Code Tasks:** See `autosem-claude-tasks.md` for 12 revenue-prioritized tasks
 
-## Current Version: 2.5.2 (GitHub)
+## Current Version: 2.5.3 (GitHub)
 
 To deploy: `POST /api/v1/deploy/pull` (updates workspace) → **Republish in Replit Deployments UI** (updates production).
 
@@ -180,7 +180,7 @@ All other rules active: CPC limits, landing page flags, scale-winner, emergency 
 | BUG-11: Klaviyo hardcoded fallback key rotted | Fixed v2.5.0 | Removed hardcoded key |
 | BUG-12: TikTok /campaigns 404 | Fixed v2.5.1 | Added tiktok_campaigns.py |
 | BUG-13: Klaviyo API key invalid in production | **OPEN** | Need new key via /validate-key |
-| BUG-14: Deploy/pull doesn't update production | **KNOWN** | Must Republish in Replit UI |
+| BUG-14: Deploy/pull doesn't update production | **Fixed v2.5.3** | Improved restart + /status, /verify endpoints. Production still needs Republish (by design). |
 | BUG-15: Meta Pixel missing from store | **OPEN** | Run POST /api/v1/pixel/install after Republish |
 | BUG-16: Campaign objective LINK_CLICKS not OUTCOME_SALES | **OPEN** | Create new conversion campaign after pixel installed |
 
