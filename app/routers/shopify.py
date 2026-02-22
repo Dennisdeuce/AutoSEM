@@ -566,6 +566,22 @@ async def webhook_order_created(request: Request, db: Session = Depends(get_db))
     attribution_svc = AttributionService(db)
     result = attribution_svc.attribute_order(order)
 
+    # Fire Meta CAPI Purchase event (server-side conversion tracking)
+    capi_result = None
+    try:
+        from app.services.meta_capi import get_capi_client
+        capi = get_capi_client(db)
+        if capi and total_price > 0:
+            capi_result = capi.send_purchase(order)
+            _log_activity(
+                db, "CAPI_PURCHASE_SENT", str(order_number),
+                f"${total_price:.2f} | pixel={capi.pixel_id} | "
+                f"events_received={capi_result.get('events_received', '?')}",
+            )
+            logger.info(f"CAPI Purchase event sent for order {order_number}: {capi_result}")
+    except Exception as e:
+        logger.warning(f"CAPI Purchase event failed for order {order_number}: {e}")
+
     # First-sale detection: auto-exit awareness mode
     first_sale_triggered = False
     if total_price > 0:
@@ -601,4 +617,5 @@ async def webhook_order_created(request: Request, db: Session = Depends(get_db))
         "items": len(line_items),
         "attribution": result,
         "first_sale_triggered": first_sale_triggered,
+        "capi_purchase": capi_result,
     }

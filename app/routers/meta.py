@@ -798,3 +798,108 @@ def upload_ad_image(image_url: str = Query(...), name: str = Query("ad_image"), 
         return {"status": "error", "message": error_body}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# ─── Conversions API (CAPI) Endpoints ────────────────────────────
+
+@router.post("/test-capi", summary="Send a test CAPI event",
+             description="Send a test PageView event to verify Conversions API is working")
+def test_capi(db: Session = Depends(get_db)):
+    """Send a test event to Meta Conversions API and return the response."""
+    from app.services.meta_capi import get_capi_client
+
+    capi = get_capi_client(db)
+    if not capi:
+        return {
+            "status": "error",
+            "message": "CAPI not configured — missing pixel_id or Meta access token",
+        }
+
+    result = capi.send_event(
+        event_name="PageView",
+        event_source_url="https://court-sportswear.com",
+        user_data={"client_user_agent": "AutoSEM-CAPI-Test/1.0"},
+        custom_data={"test_event_code": "TEST_AUTOSEM"},
+    )
+
+    events_received = result.get("events_received", 0)
+    success = events_received > 0
+
+    _log_activity(db, "CAPI_TEST_SENT", capi.pixel_id,
+                  f"Test event: events_received={events_received}, success={success}")
+
+    return {
+        "status": "ok" if success else "error",
+        "pixel_id": capi.pixel_id,
+        "events_received": events_received,
+        "meta_response": result,
+    }
+
+
+@router.get("/capi-status", summary="Check CAPI configuration and recent events",
+            description="Verify Conversions API is configured and check for recent server events")
+def capi_status(db: Session = Depends(get_db)):
+    """Check if CAPI is configured and fetch recent pixel event stats."""
+    access_token = _get_active_token(db)
+    if not access_token:
+        return {"status": "error", "configured": False, "message": "No Meta token"}
+
+    ad_account_id = META_AD_ACCOUNT_ID
+    if not ad_account_id:
+        return {"status": "error", "configured": False, "message": "No ad account ID"}
+
+    # Find pixel(s)
+    try:
+        pixels_resp = requests.get(
+            f"{META_GRAPH_BASE}/act_{ad_account_id}/adspixels",
+            params={
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+                "fields": "id,name,last_fired_time,is_created_by_business",
+            },
+            timeout=15,
+        )
+        pixels_resp.raise_for_status()
+        pixels = pixels_resp.json().get("data", [])
+    except Exception as e:
+        return {"status": "error", "configured": False, "message": f"Pixel lookup failed: {e}"}
+
+    if not pixels:
+        return {"status": "error", "configured": False, "message": "No pixels found on ad account"}
+
+    pixel_id = pixels[0]["id"]
+    pixel_name = pixels[0].get("name", "")
+    last_fired = pixels[0].get("last_fired_time")
+
+    # Get recent event stats (last 24h)
+    stats = []
+    try:
+        import time as _time
+        stats_resp = requests.get(
+            f"{META_GRAPH_BASE}/{pixel_id}/stats",
+            params={
+                "access_token": access_token,
+                "appsecret_proof": _appsecret_proof(access_token),
+                "aggregation": "event",
+                "start_time": str(int(_time.time()) - 86400),
+            },
+            timeout=15,
+        )
+        if stats_resp.status_code == 200:
+            stats = stats_resp.json().get("data", [])
+    except Exception as e:
+        logger.warning(f"CAPI stats fetch failed: {e}")
+
+    return {
+        "status": "ok",
+        "configured": True,
+        "pixel_id": pixel_id,
+        "pixel_name": pixel_name,
+        "last_fired": last_fired,
+        "pixels_count": len(pixels),
+        "recent_events_24h": stats,
+        "all_pixels": [
+            {"id": p.get("id"), "name": p.get("name"), "last_fired": p.get("last_fired_time")}
+            for p in pixels
+        ],
+    }
