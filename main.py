@@ -69,6 +69,7 @@ def create_app():
         ("app.routers.seo", "/api/v1/seo", "SEO"),
         ("app.routers.health", "/api/v1/health", "Health"),
         ("app.routers.store_health", "/api/v1/store-health", "Store Health"),
+        ("app.routers.pixel_installer", "/api/v1/pixel", "Pixel"),
     ]
 
     routers_loaded = []
